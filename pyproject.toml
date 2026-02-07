@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "diffod"
+version = "0.1.0"
+description = "A differentiable orbit determination library"
+authors = ["michael <michaelrj03@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.15"
+torch = "^2.10.0"
+dsgp4 = "^1.1.5"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
