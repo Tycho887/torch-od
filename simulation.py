@@ -34,8 +34,8 @@ list_elements(init_tle)
 t_minutes = torch.linspace(0, 200, 200)
 # Create indices: 0-50 (Pass 0), 50-100 (Pass 1), etc...
 contact_indices = torch.zeros(200, dtype=torch.long)
-contact_indices[70:130] = 1
-contact_indices[130:] = 2
+contact_indices[70:130] = 0
+contact_indices[130:] = 1
 
 station_data = get_dummy_station_data(t_minutes)
 
@@ -63,25 +63,27 @@ obs_data = {
 x0 = state_def.get_initial_state()
 
 results = system.forward(x0, obs_data)
-print("Predicted Doppler Shifts:", results)
 
 # x0 structure: [n, ma, bias_pass_0, bias_pass_1]
 
-# # Compute Jacobian
-# H = system.get_jacobian(x0, obs_data)
+# Compute Jacobian
+H = system.get_jacobian(x0, obs_data)
 
-# # --- DEBUGGING THE JACOBIAN ---
-# # H shape: (N_obs, 4)
-# # Column 0: d(Dop)/dn
-# # Column 1: d(Dop)/dma
-# # Column 2: d(Dop)/dBias0
-# # Column 3: d(Dop)/dBias1
+# --- DEBUGGING THE JACOBIAN ---
+# H shape: (N_obs, 4)
+# Column 0: d(Dop)/dn
+# Column 1: d(Dop)/dma
+# Column 2: d(Dop)/dBias0
+# Column 3: d(Dop)/dBias1
 
-# print("Checking Bias Gradients...")
-# # Get indices where we observe Pass 0
-# pass0_mask = (contact_indices == 0)
-# bias0_grads = H[pass0_mask, 2] 
+print("Checking Bias Gradients...")
+# Get indices where we observe Pass 0
+pass0_mask = (contact_indices == 0)
+bias0_grads = H[pass0_mask, 2] 
 
-# print(f"Mean Gradient for Bias 0: {bias0_grads.mean().item()}")
-# # Should print 1.0 exactly. 
-# # If it prints 0.0, check if contact_indices match the bias slice.
+print(f"Mean Gradient for Bias 0: {bias0_grads.mean().item()}")
+# Should print 1.0 exactly. 
+# If it prints 0.0, check if contact_indices match the bias slice.
+
+print(f"Jacobian shape: {H.shape}")
+print(f"First 5 rows of Jacobian:\n{H[:5, :]}")
