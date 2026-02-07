@@ -2,9 +2,11 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from dsgp4.tle import TLE
-from system import OrbitSystem
+from system import DopplerSensor, RangeSensor, MultiSensorSystem
 from state_builder import StateDefinition
 from modules import SGP4Layer
+import dsgp4
+from utils import extract_orbit_params, list_elements
 
 # --- 1. Fake Station Data (TEME) ---
 def get_dummy_station_data(t_tensor):
@@ -20,17 +22,13 @@ def get_dummy_station_data(t_tensor):
     return {'pos': pos, 'vel': vel}
 
 # --- 2. Setup ---
-# A dummy TLE dictionary to initialize the object
-tle_dict = {
-    'satellite_catalog_number': 12345,
-    'epoch_year': 23, 'epoch_days': 1.0, 'b_star': 0.0,
-    'mean_motion': 15.5 * np.pi / 43200, 'eccentricity': 0.001, 'inclination': 0.9,
-    'raan': 0.0, 'argument_of_perigee': 0.0, 'mean_anomaly': 0.0,
-    'mean_motion_first_derivative': 0.0, 'mean_motion_second_derivative': 0.0,
-    'classification': 'U', 'ephemeris_type': 0, 'international_designator': '98067A',
-    'revolution_number_at_epoch': 100, 'element_number': 999
-}
-init_tle = TLE(tle_dict)
+TLE_list = ["ISS (ZARYA)",
+"1 25544U 98067A   26038.50283897  .00012054  00000-0  23050-3 0  9996",
+"2 25544  51.6315 221.5822 0011000  74.6214 285.5989 15.48462076551652"]
+
+init_tle = TLE(TLE_list)
+
+list_elements(init_tle)
 
 # Define Simulation Time: 3 Passes
 t_minutes = torch.linspace(0, 200, 200)
@@ -43,49 +41,47 @@ station_data = get_dummy_station_data(t_minutes)
 
 # --- 3. Build System ---
 # We want to fit Mean Motion (n), Mean Anomaly (ma) and 3 Pass Biases
-state_def = StateDefinition(['n', 'ma'], num_passes=3, init_tle=init_tle)
-model = OrbitSystem(state_def, init_tle, station_data)
+state_def = StateDefinition(
+    orbital_keys=['n', 'ma'], 
+    sensor_config={'doppler': 2}, # 2 passes for Doppler
+    init_tle=init_tle
+)
 
-# --- 4. Generate TRUTH ---
-# Create a truth vector. 
-# We take the initial defaults, shift 'n' slightly, and add biases.
-x_truth = state_def.get_initial_state_vector()
-x_truth[0] += 0.001  # Perturb Mean Motion slightly
-x_truth[2] = 500.0   # Bias Pass 0: +500 Hz
-x_truth[3] = -200.0  # Bias Pass 1: -200 Hz
-x_truth[4] = 100.0   # Bias Pass 2: +100 Hz
+st_pos = station_data['pos']
+st_vel = station_data['vel']
 
-print(f"Truth Vector: {x_truth}")
+# Sensors
+sensors = {'doppler': DopplerSensor(st_pos, st_vel, 435e6)}
+system = MultiSensorSystem(state_def, init_tle, sensors)
 
-# Run Forward Pass (No Gradients needed for data gen)
-with torch.no_grad():
-    y_truth = model(x_truth, t_minutes, contact_indices)
-    
-# Add Noise
-y_obs = y_truth + torch.randn_like(y_truth) * 10.0
+# Input Data
+obs_data = {
+    'doppler': (t_minutes, contact_indices) 
+}
 
-# --- 5. Compute Jacobian at Initial Guess ---
-x_guess = state_def.get_initial_state_vector() # Biases are 0 here
-H = model.get_jacobian(x_guess, t_minutes, contact_indices)
+# Initial State
+x0 = state_def.get_initial_state()
 
-print(f"\nJacobian Shape: {H.shape}") # Should be (200, 5)
-print("Jacobian Sensitivities (First 5 rows):")
-print(H[:5])
+results = system.forward(x0, obs_data)
+print("Predicted Doppler Shifts:", results)
 
-# --- 6. Quick Solve (One Step Newton-Gauss) ---
-# dx = (H'H)^-1 H'(y_obs - y_guess)
-with torch.no_grad():
-    y_guess = model(x_guess, t_minutes, contact_indices)
-    residuals = y_obs - y_guess
-    
-    # Normal Equations
-    lhs = H.T @ H
-    rhs = H.T @ residuals
-    
-    # Solve
-    delta_x = torch.linalg.solve(lhs, rhs)
-    x_updated = x_guess + delta_x
+# x0 structure: [n, ma, bias_pass_0, bias_pass_1]
 
-print("\n--- Results ---")
-print(f"Truth Biases:  {x_truth[2:]}")
-print(f"Solved Biases: {x_updated[2:]}")
+# # Compute Jacobian
+# H = system.get_jacobian(x0, obs_data)
+
+# # --- DEBUGGING THE JACOBIAN ---
+# # H shape: (N_obs, 4)
+# # Column 0: d(Dop)/dn
+# # Column 1: d(Dop)/dma
+# # Column 2: d(Dop)/dBias0
+# # Column 3: d(Dop)/dBias1
+
+# print("Checking Bias Gradients...")
+# # Get indices where we observe Pass 0
+# pass0_mask = (contact_indices == 0)
+# bias0_grads = H[pass0_mask, 2] 
+
+# print(f"Mean Gradient for Bias 0: {bias0_grads.mean().item()}")
+# # Should print 1.0 exactly. 
+# # If it prints 0.0, check if contact_indices match the bias slice.

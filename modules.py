@@ -4,6 +4,8 @@ from dsgp4.sgp4init import sgp4init, sgp4
 from dsgp4.util import get_gravity_constants
 from dsgp4.tle import TLE
 import copy
+# from dsgp4.newton_method import newton_rapshon
+from utils import extract_orbit_params, list_elements
 
 class SGP4Layer(nn.Module):
     """
@@ -24,6 +26,8 @@ class SGP4Layer(nn.Module):
         # Store a template to clone efficiently (avoids TLE parsing overhead)
         self.template_tle = copy.deepcopy(init_tle)
 
+        self.system_kwargs = extract_orbit_params(init_tle)
+
     def forward(self, sgp4_params, t_minutes):
         """
         sgp4_params: Tensor (N_batch, 7) -> [n, e, i, raan, argp, ma, bstar]
@@ -35,11 +39,25 @@ class SGP4Layer(nn.Module):
         # 2. Clone the template TLE
         # Note: In a loop, you might want to avoid deepcopy for performance,
         # but for AD correctness with dsgp4's internal mutation, it's safest.
-        pass_tle = copy.deepcopy(self.template_tle)
+        # pass_tle = copy.deepcopy(self.template_tle)
+
+        self.system_kwargs.update({
+            'mean_motion': n / 60,  # Convert rad/min to rad/sec
+            'eccentricity': e,
+            'inclination': i,
+            'raan': raan,
+            'argument_of_perigee': argp,
+            'mean_anomaly': ma,
+            'b_star': bstar
+        })
+
+        pass_tle = TLE(self.system_kwargs)
 
         # 3. Initialize SGP4 (This mutates pass_tle with the tensor values)
         whichconst = get_gravity_constants(self.gravity)
-        
+
+        list_elements(pass_tle) # Debug: Print the TLE elements after update to verify correctness
+
         sgp4init(
             whichconst=whichconst, 
             opsmode="i", 
@@ -52,7 +70,7 @@ class SGP4Layer(nn.Module):
             xargpo=argp,
             xinclo=i, 
             xmo=ma, 
-            xno_kozai=n, 
+            xno_kozai=n, # Convert from rad/min to rad/sec for SGP4
             xnodeo=raan, 
             satellite=pass_tle
         )
@@ -64,31 +82,51 @@ class SGP4Layer(nn.Module):
         # Return Position and Velocity
         return state[:, 0], state[:, 1]
 
-class DopplerSensor(nn.Module):
-    """
-    Pure Physics Layer: Range Rate -> Doppler.
-    No learnable parameters here (they are passed as inputs or system biases).
-    """
+class BaseSensor(nn.Module): 
+    def apply_bias(self, raw_pred, bias_vector, contact_indices):
+        """
+        Helper to apply biases safely.
+        raw_pred: (N,)
+        bias_vector: (M_passes,)
+        contact_indices: (N,)
+        """
+        # Safety Check: Ensure 1D shapes to prevent (N,1) + (N,) broadcasting errors
+        raw_pred = raw_pred.view(-1)
+        
+        if bias_vector is not None and bias_vector.numel() > 0:
+            # Select specific bias for each observation
+            # Gradient flow: d(obs)/d(bias_k) = 1.0
+            obs_biases = bias_vector[contact_indices]
+            return raw_pred + obs_biases
+        
+        return raw_pred
+
+class DopplerSensor(BaseSensor):
     def __init__(self, station_teme_pos, station_teme_vel, center_freq):
         super().__init__()
-        # Register as buffers so they move to GPU with the model
         self.register_buffer('station_pos', station_teme_pos)
         self.register_buffer('station_vel', station_teme_vel)
         self.center_freq = center_freq
 
-    def forward(self, sat_pos, sat_vel):
-        # 1. Relative State
-        # Broadcasting: (T, 3) - (T, 3)
+    def forward(self, sat_pos, sat_vel, bias_vector, contact_indices):
+        # 1. Physics
         rel_pos = sat_pos - self.station_pos
         rel_vel = sat_vel - self.station_vel
-        
-        # 2. Range Rate
         dist = rel_pos.norm(dim=1, keepdim=True) + 1e-9
         los = rel_pos / dist
         range_rate = (rel_vel * los).sum(dim=1)
         
-        # 3. Doppler
-        c = 299792.458 # km/s
-        doppler = -(range_rate / c) * self.center_freq
+        doppler = -(range_rate / 299792.458) * self.center_freq
         
-        return doppler
+        # 2. Bias Application
+        return self.apply_bias(doppler, bias_vector, contact_indices)
+
+class RangeSensor(BaseSensor):
+    def __init__(self, station_teme_pos):
+        super().__init__()
+        self.register_buffer('station_pos', station_teme_pos)
+
+    def forward(self, sat_pos, sat_vel, bias_vector, contact_indices):
+        rel_pos = sat_pos - self.station_pos
+        dist = rel_pos.norm(dim=1) # (N,)
+        return self.apply_bias(dist, bias_vector, contact_indices)

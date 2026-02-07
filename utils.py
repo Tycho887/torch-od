@@ -24,3 +24,13 @@ def extract_orbit_params(tle: TLE):
         'revolution_number_at_epoch': tle.revolution_number_at_epoch,
         'element_number': tle.element_number
     }
+
+def list_elements(tle: TLE):
+
+    elements = extract_orbit_params(tle)
+
+    for key, value in elements.items():
+        try:
+            print(f"{key}: {float(value):.6f}")
+        except:
+            print(f"{key}: {value}")
