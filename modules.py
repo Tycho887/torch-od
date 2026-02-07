@@ -56,7 +56,6 @@ class SGP4Layer(nn.Module):
         # 3. Initialize SGP4 (This mutates pass_tle with the tensor values)
         whichconst = get_gravity_constants(self.gravity)
 
-        list_elements(pass_tle) # Debug: Print the TLE elements after update to verify correctness
 
         sgp4init(
             whichconst=whichconst, 

@@ -28,22 +28,22 @@ TLE_list = ["ISS (ZARYA)",
 
 init_tle = TLE(TLE_list)
 
-list_elements(init_tle)
-
 # Define Simulation Time: 3 Passes
 t_minutes = torch.linspace(0, 200, 200)
 # Create indices: 0-50 (Pass 0), 50-100 (Pass 1), etc...
 contact_indices = torch.zeros(200, dtype=torch.long)
-contact_indices[70:130] = 0
-contact_indices[130:] = 1
+contact_indices[70:130] = 1
+contact_indices[130:] = 2
+
+print(contact_indices)
 
 station_data = get_dummy_station_data(t_minutes)
 
 # --- 3. Build System ---
 # We want to fit Mean Motion (n), Mean Anomaly (ma) and 3 Pass Biases
 state_def = StateDefinition(
-    orbital_keys=['n', 'ma'], 
-    sensor_config={'doppler': 2}, # 2 passes for Doppler
+    orbital_keys=['n', 'raan'], 
+    sensor_config={'doppler': 3}, # 3 passes for Doppler
     init_tle=init_tle
 )
 
@@ -78,7 +78,7 @@ H = system.get_jacobian(x0, obs_data)
 
 print("Checking Bias Gradients...")
 # Get indices where we observe Pass 0
-pass0_mask = (contact_indices == 0)
+pass0_mask = (contact_indices == 1)
 bias0_grads = H[pass0_mask, 2] 
 
 print(f"Mean Gradient for Bias 0: {bias0_grads.mean().item()}")
@@ -86,4 +86,4 @@ print(f"Mean Gradient for Bias 0: {bias0_grads.mean().item()}")
 # If it prints 0.0, check if contact_indices match the bias slice.
 
 print(f"Jacobian shape: {H.shape}")
-print(f"First 5 rows of Jacobian:\n{H[:5, :]}")
+print(f"First 5 rows of Jacobian:\n{H[:200, :]}")
