@@ -1,32 +1,49 @@
-from dsgp4.tle import TLE
-from modules import OrbitalParameterLayer, SGP4Layer, DopplerSensor
+import torch
 import torch.nn as nn
+from torch.func import jacfwd, functional_call
+from modules import SGP4Layer, DopplerSensor
 
 class OrbitSystem(nn.Module):
-    def __init__(self, tle, station_data, num_contacts):
+    def __init__(self, state_def, init_tle, station_data):
         super().__init__()
-        # 1. The "Weights" (Orbit)
-        self.orbit = OrbitalParameterLayer(tle, trainable_keys=['n', 'ma', 'bstar'])
+        self.state_def = state_def
         
-        # 2. The "Physics" (Propagator)
-        self.propagator = SGP4Layer(tle)
+        # Layers
+        self.propagator = SGP4Layer(init_tle)
+        self.sensor = DopplerSensor(station_data['pos'], station_data['vel'], 435e6)
         
-        # 3. The "Head" (Sensor)
-        self.sensor = DopplerSensor(
-            station_data['pos'], 
-            station_data['vel'], 
-            center_freq=435e6, 
-            num_contacts=num_contacts
-        )
+        # Truth-Tuned System Parameters (NOT in the daily state vector x)
+        # These are fixed for a specific OD run, but could be trained in a separate loop.
+        self.global_bias = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, t_minutes, contact_indices):
-        # A. Get State
-        params = self.orbit()
+    def forward(self, state_vector, t_minutes, contact_indices):
+        # 1. Decode State Vector
+        sgp4_inputs, pass_biases = self.state_def.unpack(state_vector)
         
-        # B. Propagate
-        pos, vel = self.propagator(params, t_minutes)
+        # 2. Propagate (Physics)
+        # Note: sgp4_inputs needs to be (1, 7) for broadcasting if we want that,
+        # but here we are doing single-sat OD, so (7,) is fine.
+        pos, vel = self.propagator(sgp4_inputs, t_minutes)
         
-        # C. Measure
-        preds = self.sensor(pos, vel, contact_indices)
+        # 3. Sensor Model (Physics)
+        preds = self.sensor(pos, vel)
+        
+        # 4. Apply State Vector Biases (Per-Pass)
+        if pass_biases is not None:
+            # contact_indices maps time t -> pass ID
+            preds = preds + pass_biases[contact_indices]
+            
+        # 5. Apply System Corrections
+        preds = preds + self.global_bias
         
         return preds
+
+    def get_jacobian(self, state_vector, t_minutes, contact_indices):
+        """
+        Calculates d(Output)/d(StateVector) using Forward Mode AD.
+        """
+        # Functional wrapper: fix data args, differentiate wrt x
+        def model_func(x):
+            return self.forward(x, t_minutes, contact_indices)
+            
+        return jacfwd(model_func)(state_vector)

@@ -1,135 +1,91 @@
 import torch
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from dsgp4.tle import TLE
 from system import OrbitSystem
-from modules import SGP4Units
+from state_builder import StateDefinition
+from modules import SGP4Layer
 
-# --- 1. Helper: Generate Dummy Station Data (TEME Frame) ---
-def get_station_teme(t_minutes, lat_deg=55.0, lon_deg=12.0, alt_km=0.0):
-    """
-    Generates a simple rotating station position in TEME (Inertial).
-    (Approximation: Ignores precession/nutation, assumes simple Earth rotation)
-    """
-    # Earth Constants
-    R_e = 6378.137 # km
-    omega_e = 7.292115e-5 * 60.0 # rad/min
-    
-    # Station Fixed (ECEF-ish)
-    lat = np.deg2rad(lat_deg)
-    lon = np.deg2rad(lon_deg)
-    r_station = R_e + alt_km
-    
-    # Simple z-rotation for Earth spin
-    # Theta = Initial_Lon + Rotation * t
-    theta = lon + omega_e * t_minutes
-    
-    x = r_station * np.cos(lat) * np.cos(theta)
-    y = r_station * np.cos(lat) * np.sin(theta)
-    z = r_station * np.sin(lat) * torch.ones_like(t_minutes)
-    
+# --- 1. Fake Station Data (TEME) ---
+def get_dummy_station_data(t_tensor):
+    # Just a placeholder for the pre-computation step
+    # Rotating vector on Earth surface
+    theta = t_tensor * 0.05 # Earth rotation approx
+    r = 6378.0
+    x = r * torch.cos(theta)
+    y = r * torch.sin(theta)
+    z = torch.zeros_like(t_tensor)
     pos = torch.stack([x, y, z], dim=1)
-    
-    # Velocity (Derivative of pos w.r.t time)
-    # v = [-y*w, x*w, 0]
-    vx = -r_station * np.cos(lat) * np.sin(theta) * omega_e
-    vy =  r_station * np.cos(lat) * np.cos(theta) * omega_e
-    vz = torch.zeros_like(t_minutes)
-    
-    vel = torch.stack([vx, vy, vz], dim=1)
-    
-    # Convert to km/s (since omega was rad/min, vel is km/min)
-    # SGP4 outputs km/s, so we must match units.
-    return pos, vel / 60.0
+    vel = torch.stack([-y, x, z], dim=1) * 0.05
+    return {'pos': pos, 'vel': vel}
 
-
-# --- 2. Setup the "Truth" TLE ---
-revs_per_day = 15.49
-inclination_deg = 51.64
-raan_deg = 120.0
-arg_perigee_deg = 0.0
-mean_anomaly_deg = 100.0
-
+# --- 2. Setup ---
+# A dummy TLE dictionary to initialize the object
 tle_dict = {
-    'satellite_catalog_number': 25544,
-    'epoch_year': 20,
-    'epoch_days': 100.0,
-    'b_star': 0.0001,
-    'mean_motion': SGP4Units.rev_day_to_rad_s(revs_per_day),
-    'eccentricity': 0.0003,
-    'inclination': SGP4Units.deg_to_rad(inclination_deg),
-    'raan': SGP4Units.deg_to_rad(raan_deg),
-    'argument_of_perigee': SGP4Units.deg_to_rad(arg_perigee_deg),
-    'mean_anomaly': SGP4Units.deg_to_rad(mean_anomaly_deg),
-    'mean_motion_first_derivative': 0.0,
-    'mean_motion_second_derivative': 0.0,
-    'classification': 'U',
-    'ephemeris_type': 0,
-    'international_designator': '98067A',
-    'revolution_number_at_epoch': 1000,
-    'element_number': 999
+    'satellite_catalog_number': 12345,
+    'epoch_year': 23, 'epoch_days': 1.0, 'b_star': 0.0,
+    'mean_motion': 15.5 * np.pi / 43200, 'eccentricity': 0.001, 'inclination': 0.9,
+    'raan': 0.0, 'argument_of_perigee': 0.0, 'mean_anomaly': 0.0,
+    'mean_motion_first_derivative': 0.0, 'mean_motion_second_derivative': 0.0,
+    'classification': 'U', 'ephemeris_type': 0, 'international_designator': '98067A',
+    'revolution_number_at_epoch': 100, 'element_number': 999
 }
+init_tle = TLE(tle_dict)
 
-truth_tle = TLE(tle_dict)
+# Define Simulation Time: 3 Passes
+t_minutes = torch.linspace(0, 200, 200)
+# Create indices: 0-50 (Pass 0), 50-100 (Pass 1), etc...
+contact_indices = torch.zeros(200, dtype=torch.long)
+contact_indices[70:130] = 1
+contact_indices[130:] = 2
 
+station_data = get_dummy_station_data(t_minutes)
 
-# --- 3. Simulation Configuration ---
-# Simulate 2 distinct passes:
-# Pass 1: t=0 to 15 mins (Index 0)
-# Pass 2: t=90 to 105 mins (Index 1) - Orbital period is ~90 mins
-t_pass1 = torch.linspace(0, 15, 100) # 15 mins
-t_pass2 = torch.linspace(90, 105, 100) # 15 mins
-t_pass3 = torch.linspace(90+90, 105+90, 100) # 15 mins
+# --- 3. Build System ---
+# We want to fit Mean Motion (n), Mean Anomaly (ma) and 3 Pass Biases
+state_def = StateDefinition(['n', 'ma'], num_passes=3, init_tle=init_tle)
+model = OrbitSystem(state_def, init_tle, station_data)
 
-time_tensor = torch.cat([t_pass1, t_pass2, t_pass3])
-contact_indices = torch.cat([torch.zeros(100), torch.ones(100), 2*torch.ones(100)]).long()
+# --- 4. Generate TRUTH ---
+# Create a truth vector. 
+# We take the initial defaults, shift 'n' slightly, and add biases.
+x_truth = state_def.get_initial_state_vector()
+x_truth[0] += 0.001  # Perturb Mean Motion slightly
+x_truth[2] = 500.0   # Bias Pass 0: +500 Hz
+x_truth[3] = -200.0  # Bias Pass 1: -200 Hz
+x_truth[4] = 100.0   # Bias Pass 2: +100 Hz
 
-# Generate Station Ephemerides for these times
-station_pos, station_vel = get_station_teme(time_tensor, lat_deg=50.0, lon_deg=10.0)
-station_data = {'pos': station_pos, 'vel': station_vel}
+print(f"Truth Vector: {x_truth}")
 
-
-# --- 4. Initialize the "System" ---
-# Note: We use the 'OrbitSystem' class defined in the previous response
-sim_system = OrbitSystem(truth_tle, station_data, num_contacts=3)
-
-
-# --- 5. Inject "Secret" Biases (Optional) ---
-# To make the test realistic, let's manually drift the clock for Pass 1
-# Access the embedding layer directly
+# Run Forward Pass (No Gradients needed for data gen)
 with torch.no_grad():
-    # Set Bias for Pass 0 to +1500 Hz
-    sim_system.sensor.bias_embedding.weight[0] = 1500.0 
-    # Set Bias for Pass 1 to -500 Hz
-    sim_system.sensor.bias_embedding.weight[1] = -500.0
-    sim_system.sensor.bias_embedding.weight[2] = 500.0
+    y_truth = model(x_truth, t_minutes, contact_indices)
+    
+# Add Noise
+y_obs = y_truth + torch.randn_like(y_truth) * 10.0
 
+# --- 5. Compute Jacobian at Initial Guess ---
+x_guess = state_def.get_initial_state_vector() # Biases are 0 here
+H = model.get_jacobian(x_guess, t_minutes, contact_indices)
 
-# --- 6. Run Simulation (Forward Pass) ---
-sim_system.eval() # Good practice, though mostly irrelevant for this specific architecture
+print(f"\nJacobian Shape: {H.shape}") # Should be (200, 5)
+print("Jacobian Sensitivities (First 5 rows):")
+print(H[:5])
+
+# --- 6. Quick Solve (One Step Newton-Gauss) ---
+# dx = (H'H)^-1 H'(y_obs - y_guess)
 with torch.no_grad():
-    # This calls: OrbitLayer -> SGP4Layer -> DopplerSensor
-    clean_doppler = sim_system(time_tensor, contact_indices)
+    y_guess = model(x_guess, t_minutes, contact_indices)
+    residuals = y_obs - y_guess
+    
+    # Normal Equations
+    lhs = H.T @ H
+    rhs = H.T @ residuals
+    
+    # Solve
+    delta_x = torch.linalg.solve(lhs, rhs)
+    x_updated = x_guess + delta_x
 
-
-# --- 7. Add Measurement Noise ---
-# Add Gaussian white noise (sigma = 50 Hz)
-noise_sigma = 5.0
-noise = torch.randn_like(clean_doppler) * noise_sigma
-noisy_doppler = clean_doppler + noise
-
-
-# --- 8. Visualize ---
-print(f"Generated {len(noisy_doppler)} data points.")
-print(f"Pass 1 Mean Doppler: {clean_doppler[:100].mean():.2f} Hz (Includes +1500 bias)")
-
-plt.figure(figsize=(10, 5))
-plt.plot(time_tensor.numpy(), noisy_doppler.numpy(), '.', label='Simulated Data (Noisy)', alpha=0.5)
-plt.plot(time_tensor.numpy(), clean_doppler.numpy(), 'k-', label='Truth (Clean)', linewidth=1)
-plt.xlabel('Time (minutes from Epoch)')
-plt.ylabel('Doppler Shift (Hz)')
-plt.title('Simulated Doppler Data with Per-Pass Biases')
-plt.legend()
-plt.grid(True)
-plt.savefig('simulated_doppler.png', dpi=300)
-plt.close()
+print("\n--- Results ---")
+print(f"Truth Biases:  {x_truth[2:]}")
+print(f"Solved Biases: {x_updated[2:]}")
