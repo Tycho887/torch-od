@@ -5,7 +5,7 @@ from dsgp4.util import get_gravity_constants
 from dsgp4.tle import TLE
 import copy
 # from dsgp4.newton_method import newton_rapshon
-from utils import extract_orbit_params, list_elements
+from src.utils import extract_orbit_params, list_elements
 
 class SGP4Layer(nn.Module):
     """
@@ -81,51 +81,51 @@ class SGP4Layer(nn.Module):
         # Return Position and Velocity
         return state[:, 0], state[:, 1]
 
-class BaseSensor(nn.Module): 
-    def apply_bias(self, raw_pred, bias_vector, contact_indices):
-        """
-        Helper to apply biases safely.
-        raw_pred: (N,)
-        bias_vector: (M_passes,)
-        contact_indices: (N,)
-        """
-        # Safety Check: Ensure 1D shapes to prevent (N,1) + (N,) broadcasting errors
-        raw_pred = raw_pred.view(-1)
-        
-        if bias_vector is not None and bias_vector.numel() > 0:
-            # Select specific bias for each observation
-            # Gradient flow: d(obs)/d(bias_k) = 1.0
-            obs_biases = bias_vector[contact_indices]
-            return raw_pred + obs_biases
-        
-        return raw_pred
+# We want to restructure to have a physics layer: SGP4 -> Physics projections (Range, Doppler) -> Sensor models + Biases
 
-class DopplerSensor(BaseSensor):
-    def __init__(self, station_teme_pos, station_teme_vel, center_freq):
+class GeometryLayer(nn.Module):
+    """
+    Computes relative kinematics between Satellite and Station.
+    This is the 'ground truth' geometry before any sensor physics.
+    """
+    def __init__(self, station_teme_pos, station_teme_vel):
         super().__init__()
         self.register_buffer('station_pos', station_teme_pos)
         self.register_buffer('station_vel', station_teme_vel)
-        self.center_freq = center_freq
 
-    def forward(self, sat_pos, sat_vel, bias_vector, contact_indices):
-        # 1. Physics
-        rel_pos = sat_pos - self.station_pos
-        rel_vel = sat_vel - self.station_vel
-        dist = rel_pos.norm(dim=1, keepdim=True) + 1e-9
-        los = rel_pos / dist
-        range_rate = (rel_vel * los).sum(dim=1)
+    def forward(self, sat_pos, sat_vel, contact_indices):
+        """
+        Returns a dictionary of geometric primitives.
+        """
+        # 1. Match Station to Satellite (by index)
+        # Assuming station_pos is pre-computed for all timestamps
+        st_pos = self.station_pos
+        st_vel = self.station_vel
+
+        # 2. Relative Vectors (The "Geometry")
+        rel_pos = sat_pos - st_pos
+        rel_vel = sat_vel - st_vel
         
-        doppler = -(range_rate / 299792.458) * self.center_freq
+        # 3. Derived Primitives (Computed once, used by all sensors)
+        range_dist = rel_pos.norm(dim=1, keepdim=True) + 1e-9
+        unit_vec = rel_pos / range_dist
         
-        # 2. Bias Application
-        return self.apply_bias(doppler, bias_vector, contact_indices)
+        # Projection of velocity onto line-of-sight (Range Rate)
+        range_rate = (rel_vel * unit_vec).sum(dim=1, keepdim=True)
 
-class RangeSensor(BaseSensor):
-    def __init__(self, station_teme_pos):
-        super().__init__()
-        self.register_buffer('station_pos', station_teme_pos)
+        return {
+            'rel_pos': rel_pos,
+            'rel_vel': rel_vel,
+            'range': range_dist,
+            'range_rate': range_rate,
+            'unit_vec': unit_vec,
+            'contact_indices': contact_indices
+        }
 
-    def forward(self, sat_pos, sat_vel, bias_vector, contact_indices):
-        rel_pos = sat_pos - self.station_pos
-        dist = rel_pos.norm(dim=1) # (N,)
-        return self.apply_bias(dist, bias_vector, contact_indices)
+class RangeRatePhysics(nn.Module):
+    def forward(self, geometry):
+        return geometry['range_rate'] # km/s
+
+class RangePhysics(nn.Module):
+    def forward(self, geometry):
+        return geometry['range'] # km
