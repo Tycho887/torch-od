@@ -7,9 +7,15 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.15"
-torch = "^2.10.0"
+# Link the torch dependency to the specific source defined below
+torch = { version = "^2.5.1", source = "pytorch_cpu" }
 dsgp4 = "^1.1.5"
 
+# Define the source for CPU-only wheels
+[[tool.poetry.source]]
+name = "pytorch_cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]
