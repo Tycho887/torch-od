@@ -32,7 +32,7 @@ TLE_list = ["ISS (ZARYA)",
 init_tle = TLE(TLE_list)
 
 # Time: 200 minutes
-t_all = torch.linspace(0, 200, 200)
+t_all = torch.linspace(0, 2000, 2000)
 
 # Station Ephemeris
 st_pos, st_vel = get_station_vectors(t_all)
@@ -47,8 +47,8 @@ sensors = {'doppler': doppler_sensor, 'radar': radar_sensor}
 
 # --- 4. Define Observation Packets ---
 # Split data: 0-100 min (Pass 0), 100-200 min (Pass 1)
-indices = torch.zeros(200, dtype=torch.long)
-indices[100:] = 1
+indices = torch.zeros(2000, dtype=torch.long)
+indices[1000:] = 1
 
 obs_data = {
     'doppler': {'t': t_all, 'indices': indices},
@@ -79,11 +79,11 @@ plt.figure(figsize=(12, 6))
 
 # A. Plot Doppler Gradients for Pass 0 Bias
 # Rows 0:100 are Pass 0 Doppler. Param Index 2 is dop_bias_0.
-grad_dop_bias0 = H[0:100, 2]
+grad_dop_bias0 = H[0:1000, 0]
 plt.subplot(1, 2, 1)
-plt.plot(t_all[:100], grad_dop_bias0.detach().numpy(), label='Gradient w.r.t Bias 0')
-plt.title("Doppler Sensor Gradients (Bias)")
-plt.ylabel("d(Doppler)/d(Bias) [Hz/Hz]")
+plt.plot(t_all[:1000], grad_dop_bias0.detach().numpy(), label='Gradient w.r.t Bias 0')
+plt.title("Mean motion sensitivity")
+plt.ylabel("d(Doppler)/d(Mean motion) [rad/s/Hz]")
 plt.legend()
 plt.grid(True)
 
@@ -91,7 +91,7 @@ plt.grid(True)
 # Param Index 4 is Freq Offset
 grad_dop_fc = H[:, 4]
 plt.subplot(1, 2, 2)
-plt.plot(t_all, grad_dop_fc.detach().numpy()[:200], color='orange', label='Gradient w.r.t Fc')
+plt.plot(t_all, grad_dop_fc.detach().numpy()[2000:], color='orange', label='Gradient w.r.t Fc')
 plt.title("Doppler Sensitivity to Freq Offset")
 plt.ylabel("d(Doppler)/d(Fc) [Hz/Hz]")
 plt.legend()
@@ -103,3 +103,36 @@ plt.close()
 # Verification
 print(f"Mean Gradient for Doppler Bias 0 (should be 1.0): {grad_dop_bias0.mean().item():.4f}")
 print(f"Mean Gradient for Doppler Freq Offset: {grad_dop_fc.mean().item():.4f}")
+
+# --- 8. Plotting Expected Values ---
+print("Generating expected values...")
+with torch.no_grad():
+    preds = system(x0, obs_data)
+
+# Split predictions based on observation counts (sorted keys: doppler, radar)
+n_dop = len(obs_data['doppler']['t'])
+dop_preds = preds[:n_dop].numpy()
+rad_preds = preds[n_dop:].numpy()
+
+plt.figure(figsize=(12, 6))
+
+plt.subplot(1, 2, 1)
+plt.plot(t_all.numpy(), dop_preds, label='Expected Doppler')
+plt.title("Expected Doppler Signal")
+plt.xlabel("Time (min)")
+plt.ylabel("Doppler Shift (Hz)")
+plt.grid(True)
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(t_all.numpy(), rad_preds, color='orange', label='Expected Range')
+plt.title("Expected Radar Range")
+plt.xlabel("Time (min)")
+plt.ylabel("Range (km)")
+plt.grid(True)
+plt.legend()
+
+plt.tight_layout()
+plt.savefig("expected_values.png")
+plt.close()
+print("Saved expected_values.png")
