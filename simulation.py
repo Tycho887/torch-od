@@ -4,27 +4,7 @@ import numpy as np
 from dsgp4.tle import TLE
 from src.systemObject import BaseOrbitSystem
 from src.sensorLayers import DopplerSensor, RadarSensor
-
-
-# --- 1. Helper: Dummy Station ---
-def get_station_vectors(t_minutes) -> tuple[torch.Tensor, torch.Tensor]:
-    # Simple Earth Rotation model
-    # rad/min = 2pi / 1440
-    w_earth = (2 * np.pi) / 1440.0 
-    theta = w_earth * t_minutes
-    r = 6378.0
-    x = r * torch.cos(input=theta)
-    y = r * torch.sin(input=theta)
-    z = torch.zeros_like(input=t_minutes)
-    
-    pos = torch.stack(tensors=[x, y, z], dim=1)
-    # Velocity (tangential)
-    vx = -r * w_earth * torch.sin(input=theta)
-    vy =  r * w_earth * torch.cos(input=theta)
-    vz = torch.zeros_like(input=t_minutes)
-    vel = torch.stack(tensors=[vx, vy, vz], dim=1)
-    
-    return pos, vel
+from src.groundStation import GroundStation
 
 # --- 2. Setup Scenario ---
 TLE_list = ["ISS (ZARYA)",
@@ -32,22 +12,20 @@ TLE_list = ["ISS (ZARYA)",
 "2 25544  51.6315 221.5822 0011000  74.6214 285.5989 15.48462076551652"]
 init_tle = TLE(data=TLE_list)
 
-# Time: 200 minutes
-t_all = torch.linspace(start=0, end=2000, steps=2000)
+# Time: 2000 minutes
+t_all = torch.linspace(start=1762418742, end=1762418742+86400, steps=2000)
 
-# Station Ephemeris
-st_pos, st_vel = get_station_vectors(t_minutes=t_all)
+# --- 3. Define Ground Station ---
+gs_main = GroundStation(lat_deg=9.0, lon_deg=0.0, alt_km=0.0, epoch_tai = float(t_all[0]),  station_id='GS_1')
+ground_stations = {'GS_1': gs_main}
 
-# --- 3. Define Sensors ---
-# Doppler: 2 passes, fit center freq
-doppler_sensor = DopplerSensor(station_teme_pos=st_pos, station_teme_vel=st_vel, center_freq=435e6, num_passes=2, fit_center_freq=True)
-# Radar: 2 passes (same times)
-radar_sensor = RadarSensor(station_teme_pos=st_pos, num_passes=2)
+# --- 4. Define Sensors ---
+doppler_sensor = DopplerSensor(center_freq=435e6, num_passes=2, fit_center_freq=True, station_id='GS_1')
+radar_sensor = RadarSensor(num_passes=2, station_id='GS_1')
 
 sensors = {'doppler': doppler_sensor, 'radar': radar_sensor}
 
-# --- 4. Define Observation Packets ---
-# Split data: 0-100 min (Pass 0), 100-200 min (Pass 1)
+# --- 5. Define Observation Packets ---
 indices = torch.zeros(2000, dtype=torch.long)
 indices[1000:] = 1
 
@@ -56,10 +34,10 @@ obs_data = {
     'radar':   {'t': t_all, 'indices': indices}
 }
 
-# --- 5. Build System ---
-system = BaseOrbitSystem(init_tle, fit_keys=['n', 'i'], sensors_dict=sensors)
+# --- 6. Build System ---
+system = BaseOrbitSystem(init_tle=init_tle, fit_keys=['n', 'i'], sensors_dict=sensors, ground_stations=ground_stations)
 
-# --- 6. Jacobian Analysis ---
+# --- 7. Jacobian Analysis ---
 x0 = system.state_def.get_initial_state()
 # x0 layout: 
 # [ n, i, 
@@ -73,7 +51,7 @@ H = system.get_jacobian(state_vector=x0, observations=obs_data)
 # First 200 rows = Doppler, Next 200 rows = Radar
 
 print(f"Jacobian shape: {H.shape}")
-print(f"Jacobian sample (Doppler rows, Doppler params):\n{H[:5, :5]}")
+print(f"Jacobian sample (Doppler rows, Doppler params):\n{H[1000:, 2:]}")
 
 # --- 7. Plotting ---
 plt.figure(figsize=(12, 6))
@@ -83,20 +61,20 @@ plt.figure(figsize=(12, 6))
 grad_dop_bias0 = H[0:1000, 0]
 plt.subplot(1, 2, 1)
 plt.plot(t_all[:1000], grad_dop_bias0.detach().numpy(), label='Gradient w.r.t Bias 0')
-plt.title("Mean motion sensitivity")
-plt.ylabel("d(Doppler)/d(Mean motion) [rad/s/Hz]")
+plt.title(label="Mean motion sensitivity")
+plt.ylabel(ylabel="d(Doppler)/d(Mean motion) [rad/s/Hz]")
 plt.legend()
-plt.grid(True)
+plt.grid(visible=True)
 
 # B. Plot Doppler Gradient for Frequency Offset
 # Param Index 4 is Freq Offset
 grad_dop_fc = H[:, 4]
 plt.subplot(1, 2, 2)
 plt.plot(t_all, grad_dop_fc.detach().numpy()[2000:], color='orange', label='Gradient w.r.t Fc')
-plt.title("Doppler Sensitivity to Freq Offset")
-plt.ylabel("d(Doppler)/d(Fc) [Hz/Hz]")
+plt.title(label="Doppler Sensitivity to Freq Offset")
+plt.ylabel(ylabel="d(Doppler)/d(Fc) [Hz/Hz]")
 plt.legend()
-plt.grid(True)
+plt.grid(visible=True)
 
 plt.tight_layout()
 plt.savefig("jacobian_analysis.png")

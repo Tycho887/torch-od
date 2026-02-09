@@ -24,10 +24,13 @@ class BaseSensor(nn.Module, ABC):
         return torch.zeros(self.num_params, dtype=torch.float64)
 
 class DopplerSensor(BaseSensor):
-    def __init__(self, station_teme_pos, station_teme_vel, center_freq, num_passes, fit_center_freq=False) -> None:
+    def __init__(self, center_freq, num_passes, station_teme_pos=None, station_teme_vel=None, fit_center_freq=False, station_id=None) -> None:
         super().__init__()
-        self.register_buffer(name='station_pos', tensor=station_teme_pos)
-        self.register_buffer(name='station_vel', tensor=station_teme_vel)
+        if station_teme_pos is not None:
+            self.register_buffer(name='station_pos', tensor=station_teme_pos)
+            self.register_buffer(name='station_vel', tensor=station_teme_vel)
+            
+        self.station_id = station_id
         self.nominal_freq = center_freq
         self.fit_fc = fit_center_freq
         self.n_passes = num_passes
@@ -50,8 +53,15 @@ class DopplerSensor(BaseSensor):
         sat_pos = geometry_data['pos']
         sat_vel = geometry_data['vel']
         
-        rel_pos = sat_pos - self.station_pos
-        rel_vel = sat_vel - self.station_vel
+        # Check for dynamic station state (from GroundStation module)
+        if 'station_pos' in geometry_data:
+            st_pos = geometry_data['station_pos']
+            st_vel = geometry_data['station_vel']
+        else:
+            st_pos, st_vel = self.station_pos, self.station_vel
+        
+        rel_pos = sat_pos - st_pos
+        rel_vel = sat_vel - st_vel
         
         dist = rel_pos.norm(dim=1, keepdim=True) + 1e-9
         los_vec = rel_pos / dist
@@ -81,9 +91,11 @@ class DopplerSensor(BaseSensor):
         return doppler_ideal
 
 class RadarSensor(BaseSensor):
-    def __init__(self, station_teme_pos, num_passes) -> None:
+    def __init__(self, num_passes, station_teme_pos=None, station_id=None) -> None:
         super().__init__()
-        self.register_buffer(name='station_pos', tensor=station_teme_pos)
+        if station_teme_pos is not None:
+            self.register_buffer(name='station_pos', tensor=station_teme_pos)
+        self.station_id = station_id
         self.n_passes = num_passes
 
     @property
@@ -92,7 +104,13 @@ class RadarSensor(BaseSensor):
     
     def forward(self, geometry_data, sensor_params, contact_indices) -> torch.Tensor:
         sat_pos = geometry_data['pos']
-        rel_pos = sat_pos - self.station_pos
+        
+        if 'station_pos' in geometry_data:
+            st_pos = geometry_data['station_pos']
+        else:
+            st_pos = self.station_pos
+            
+        rel_pos = sat_pos - st_pos
         
         # 1. Ideal Range
         range_km = rel_pos.norm(dim=1).view(-1)

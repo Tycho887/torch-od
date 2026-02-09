@@ -5,7 +5,7 @@ from dsgp4.util import get_gravity_constants
 from dsgp4.tle import TLE
 import copy
 # from dsgp4.newton_method import newton_rapshon
-from src.utils import extract_orbit_params, list_elements
+from src.utils import extract_orbit_params, list_elements, get_tle_epoch_tai
 
 class SGP4Layer(nn.Module):
     """
@@ -27,11 +27,14 @@ class SGP4Layer(nn.Module):
         self.template_tle = copy.deepcopy(x=init_tle)
 
         self.system_kwargs = extract_orbit_params(tle=init_tle)
+        
+        # Store TLE epoch in TAI for relative time conversion
+        self.tle_epoch_tai = get_tle_epoch_tai(init_tle)
 
-    def forward(self, sgp4_params, t_minutes) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, sgp4_params, t_tai) -> tuple[torch.Tensor, torch.Tensor]:
         """
         sgp4_params: Tensor (N_batch, 7) -> [n, e, i, raan, argp, ma, bstar]
-        t_minutes: Tensor (T_steps)
+        t_tai: Tensor (T_steps) of TAI seconds
         """
         # 1. Unpack params
         n, e, i, raan, argp, ma, bstar = sgp4_params.unbind(-1)
@@ -75,6 +78,10 @@ class SGP4Layer(nn.Module):
         )
 
         # 4. Propagate
+        # SGP4 expects minutes since TLE epoch
+        t_diff_sec = t_tai - self.tle_epoch_tai
+        t_minutes = t_diff_sec / 60.0
+        
         # Returns: (Batch, Time, 2, 3) if batched, or (Time, 2, 3)
         state = sgp4(satellite=pass_tle, tsince=t_minutes)
         
