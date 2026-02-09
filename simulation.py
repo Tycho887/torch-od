@@ -5,23 +5,24 @@ from dsgp4.tle import TLE
 from src.systemObject import BaseOrbitSystem
 from src.sensorLayers import DopplerSensor, RadarSensor
 
+
 # --- 1. Helper: Dummy Station ---
-def get_station_vectors(t_minutes):
+def get_station_vectors(t_minutes) -> tuple[torch.Tensor, torch.Tensor]:
     # Simple Earth Rotation model
     # rad/min = 2pi / 1440
     w_earth = (2 * np.pi) / 1440.0 
     theta = w_earth * t_minutes
     r = 6378.0
-    x = r * torch.cos(theta)
-    y = r * torch.sin(theta)
-    z = torch.zeros_like(t_minutes)
+    x = r * torch.cos(input=theta)
+    y = r * torch.sin(input=theta)
+    z = torch.zeros_like(input=t_minutes)
     
-    pos = torch.stack([x, y, z], dim=1)
+    pos = torch.stack(tensors=[x, y, z], dim=1)
     # Velocity (tangential)
-    vx = -r * w_earth * torch.sin(theta)
-    vy =  r * w_earth * torch.cos(theta)
-    vz = torch.zeros_like(t_minutes)
-    vel = torch.stack([vx, vy, vz], dim=1)
+    vx = -r * w_earth * torch.sin(input=theta)
+    vy =  r * w_earth * torch.cos(input=theta)
+    vz = torch.zeros_like(input=t_minutes)
+    vel = torch.stack(tensors=[vx, vy, vz], dim=1)
     
     return pos, vel
 
@@ -29,10 +30,10 @@ def get_station_vectors(t_minutes):
 TLE_list = ["ISS (ZARYA)",
 "1 25544U 98067A   26038.50283897  .00012054  00000-0  23050-3 0  9996",
 "2 25544  51.6315 221.5822 0011000  74.6214 285.5989 15.48462076551652"]
-init_tle = TLE(TLE_list)
+init_tle = TLE(data=TLE_list)
 
 # Time: 200 minutes
-t_all = torch.linspace(0, 2000, 2000)
+t_all = torch.linspace(start=0, end=2000, steps=2000)
 
 # Station Ephemeris
 st_pos, st_vel = get_station_vectors(t_minutes=t_all)
@@ -66,7 +67,7 @@ x0 = system.state_def.get_initial_state()
 #   rad_bias_0, rad_bias_1 ]
 
 print("Computing Jacobian...")
-H = system.get_jacobian(x0, obs_data)
+H = system.get_jacobian(state_vector=x0, observations=obs_data)
 
 # H structure: (400 meas, 7 params) 
 # First 200 rows = Doppler, Next 200 rows = Radar
