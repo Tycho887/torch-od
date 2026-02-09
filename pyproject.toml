@@ -1,16 +1,25 @@
-[tool.poetry]
+[project]
 name = "diffod"
 version = "0.1.0"
-description = "A differentiable orbit determination library"
-authors = ["michael <michaelrj03@gmail.com>"]
+description = "Orbit determination using differentiable programming"
+authors = [
+    {name = "Michael R Johansen",email = "michaerj03@gmail.com"}
+]
 readme = "README.md"
-
-[tool.poetry.dependencies]
-python = ">=3.12,<3.15"
-torch = "^2.10.0"
-dsgp4 = "^1.1.5"
-
+requires-python = ">=3.13"
+dependencies = [
+    "torch (>=2.9.0,<3.0.0)",
+    "dsgp4 (>=1.1.5,<2.0.0)",
+]
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "torch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[tool.poetry.dependencies]
+torch = {source = "torch-cpu"}
