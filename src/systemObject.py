@@ -5,13 +5,13 @@ from src.physicsLayers import SGP4Layer
 from src.stateDefinitionLayer import DynamicStateDefinition
 
 class BaseOrbitSystem(nn.Module):
-    def __init__(self, init_tle, fit_keys, sensors_dict):
+    def __init__(self, init_tle, fit_keys, sensors_dict) -> None:
         super().__init__()
-        self.state_def = DynamicStateDefinition(fit_keys, sensors_dict, init_tle)
-        self.propagator = SGP4Layer(init_tle)
-        self.sensors = nn.ModuleDict(sensors_dict)
+        self.state_def = DynamicStateDefinition(orbital_keys=fit_keys, sensors_dict=sensors_dict, init_tle=init_tle)
+        self.propagator = SGP4Layer(init_tle=init_tle)
+        self.sensors = nn.ModuleDict(modules=sensors_dict)
 
-    def forward(self, state_vector, observations):
+    def forward(self, state_vector, observations) -> torch.Tensor:
         """
         observations: {
            'doppler': {'t': ..., 'indices': ...},
@@ -19,7 +19,7 @@ class BaseOrbitSystem(nn.Module):
         }
         """
         # 1. Unpack Global State
-        sgp4_inputs, sensor_param_dict = self.state_def.unpack(state_vector)
+        sgp4_inputs, sensor_param_dict = self.state_def.unpack(state_vector=state_vector)
         
         all_preds = []
         
@@ -47,21 +47,21 @@ class BaseOrbitSystem(nn.Module):
             preds = sensor_module(geo_data, sensor_params, contact_idx)
             all_preds.append(preds)
             
-        return torch.cat(all_preds)
+        return torch.cat(tensors=all_preds)
 
-    def residuals(self, state_vector, observations, measurements):
-        preds = self.forward(state_vector, observations)
+    def residuals(self, state_vector, observations, measurements) -> torch.Tensor:
+        preds = self.forward(state_vector=state_vector, observations=observations)
         
         if isinstance(measurements, dict):
             meas_list = []
             for name in sorted(observations.keys()):
                 if name in self.sensors:
                     meas_list.append(measurements[name])
-            measurements = torch.cat(meas_list)
+            measurements = torch.cat(tensors=meas_list)
             
         return preds - measurements
 
-    def get_jacobian(self, state_vector, observations):
-        def model_func(x):
-            return self.forward(x, observations)
+    def get_jacobian(self, state_vector, observations) -> torch.Tensor:
+        def model_func(x) -> torch.Tensor:
+            return self.forward(state_vector=x, observations=observations)
         return jacfwd(model_func)(state_vector)

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 
 class DynamicStateDefinition:
-    def __init__(self, orbital_keys, sensors_dict, init_tle):
+    def __init__(self, orbital_keys, sensors_dict, init_tle) -> None:
         self.orbital_keys = orbital_keys
         self.sensors_dict = sensors_dict # Store this reference!
         self.orbit_dim = len(orbital_keys)
@@ -30,9 +30,9 @@ class DynamicStateDefinition:
         }
         
         # Pre-compute the index map for the orbital part
-        self.idx_map = {k: i for i, k in enumerate(orbital_keys)}
+        self.idx_map = {k: i for i, k in enumerate(iterable=orbital_keys)}
 
-    def get_initial_state(self):
+    def get_initial_state(self) -> torch.Tensor:
         """
         Returns x0 populated with:
         1. Initial TLE values (for active orbital keys)
@@ -61,7 +61,7 @@ class DynamicStateDefinition:
             
         return x
 
-    def unpack(self, state_vector):
+    def unpack(self, state_vector) -> tuple[torch.Tensor, dict]:
         # (Same as before...)
         current_vals = self.defaults.copy() 
         for key in self.orbital_keys:

@@ -13,7 +13,7 @@ class SGP4Layer(nn.Module):
     Input: Tensor of orbital elements (SGP4 units: rad/min, rad, etc.)
     Output: Position/Velocity (TEME, km, km/s)
     """
-    def __init__(self, init_tle: TLE, gravity_constant='wgs-84'):
+    def __init__(self, init_tle: TLE, gravity_constant='wgs-84') -> None:
         super().__init__()
         self.gravity = gravity_constant
         self.sat_id = init_tle.satellite_catalog_number
@@ -24,11 +24,11 @@ class SGP4Layer(nn.Module):
         self.nddot = init_tle._nddot
         
         # Store a template to clone efficiently (avoids TLE parsing overhead)
-        self.template_tle = copy.deepcopy(init_tle)
+        self.template_tle = copy.deepcopy(x=init_tle)
 
-        self.system_kwargs = extract_orbit_params(init_tle)
+        self.system_kwargs = extract_orbit_params(tle=init_tle)
 
-    def forward(self, sgp4_params, t_minutes):
+    def forward(self, sgp4_params, t_minutes) -> tuple[torch.Tensor, torch.Tensor]:
         """
         sgp4_params: Tensor (N_batch, 7) -> [n, e, i, raan, argp, ma, bstar]
         t_minutes: Tensor (T_steps)
@@ -54,7 +54,7 @@ class SGP4Layer(nn.Module):
         pass_tle = TLE(self.system_kwargs)
 
         # 3. Initialize SGP4 (This mutates pass_tle with the tensor values)
-        whichconst = get_gravity_constants(self.gravity)
+        whichconst = get_gravity_constants(gravity_constant_name=self.gravity)
 
 
         sgp4init(
@@ -76,7 +76,7 @@ class SGP4Layer(nn.Module):
 
         # 4. Propagate
         # Returns: (Batch, Time, 2, 3) if batched, or (Time, 2, 3)
-        state = sgp4(pass_tle, t_minutes)
+        state = sgp4(satellite=pass_tle, tsince=t_minutes)
         
         # Return Position and Velocity
         return state[:, 0], state[:, 1]
@@ -88,12 +88,12 @@ class GeometryLayer(nn.Module):
     Computes relative kinematics between Satellite and Station.
     This is the 'ground truth' geometry before any sensor physics.
     """
-    def __init__(self, station_teme_pos, station_teme_vel):
+    def __init__(self, station_teme_pos, station_teme_vel) -> None:
         super().__init__()
-        self.register_buffer('station_pos', station_teme_pos)
-        self.register_buffer('station_vel', station_teme_vel)
+        self.register_buffer(name='station_pos', tensor=station_teme_pos)
+        self.register_buffer(name='station_vel', tensor=station_teme_vel)
 
-    def forward(self, sat_pos, sat_vel, contact_indices):
+    def forward(self, sat_pos, sat_vel, contact_indices) -> dict:
         """
         Returns a dictionary of geometric primitives.
         """
@@ -123,9 +123,9 @@ class GeometryLayer(nn.Module):
         }
 
 class RangeRatePhysics(nn.Module):
-    def forward(self, geometry):
+    def forward(self, geometry) -> torch.Tensor:
         return geometry['range_rate'] # km/s
 
 class RangePhysics(nn.Module):
-    def forward(self, geometry):
+    def forward(self, geometry) -> torch.Tensor:
         return geometry['range'] # km

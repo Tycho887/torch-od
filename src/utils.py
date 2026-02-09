@@ -1,6 +1,7 @@
 from dsgp4.tle import TLE
+import torch
 
-def extract_orbit_params(tle: TLE):
+def extract_orbit_params(tle: TLE) -> dict[str, torch.Tensor | float | int]:
     """
     Helper to convert a TLE object into a dictionary of parameters.
     This is used to populate 'static_tle_params' and can be reused in unpacking.
@@ -25,9 +26,9 @@ def extract_orbit_params(tle: TLE):
         'element_number': tle.element_number
     }
 
-def list_elements(tle: TLE):
+def list_elements(tle: TLE) -> None:
 
-    elements = extract_orbit_params(tle)
+    elements = extract_orbit_params(tle=tle)
 
     for key, value in elements.items():
         try:

@@ -35,13 +35,13 @@ init_tle = TLE(TLE_list)
 t_all = torch.linspace(0, 2000, 2000)
 
 # Station Ephemeris
-st_pos, st_vel = get_station_vectors(t_all)
+st_pos, st_vel = get_station_vectors(t_minutes=t_all)
 
 # --- 3. Define Sensors ---
 # Doppler: 2 passes, fit center freq
-doppler_sensor = DopplerSensor(st_pos, st_vel, center_freq=435e6, num_passes=2, fit_center_freq=True)
+doppler_sensor = DopplerSensor(station_teme_pos=st_pos, station_teme_vel=st_vel, center_freq=435e6, num_passes=2, fit_center_freq=True)
 # Radar: 2 passes (same times)
-radar_sensor = RadarSensor(st_pos, num_passes=2)
+radar_sensor = RadarSensor(station_teme_pos=st_pos, num_passes=2)
 
 sensors = {'doppler': doppler_sensor, 'radar': radar_sensor}
 
@@ -118,18 +118,18 @@ plt.figure(figsize=(12, 6))
 
 plt.subplot(1, 2, 1)
 plt.plot(t_all.numpy(), dop_preds, label='Expected Doppler')
-plt.title("Expected Doppler Signal")
-plt.xlabel("Time (min)")
-plt.ylabel("Doppler Shift (Hz)")
-plt.grid(True)
+plt.title(label="Expected Doppler Signal")
+plt.xlabel(xlabel="Time (min)")
+plt.ylabel(ylabel="Doppler Shift (Hz)")
+plt.grid(visible=True)
 plt.legend()
 
 plt.subplot(1, 2, 2)
 plt.plot(t_all.numpy(), rad_preds, color='orange', label='Expected Range')
-plt.title("Expected Radar Range")
-plt.xlabel("Time (min)")
-plt.ylabel("Range (km)")
-plt.grid(True)
+plt.title(label="Expected Radar Range")
+plt.xlabel(xlabel="Time (min)")
+plt.ylabel(ylabel="Range (km)")
+plt.grid(visible=True)
 plt.legend()
 
 plt.tight_layout()

@@ -3,7 +3,7 @@ import torch.nn as nn
 from abc import ABC, abstractmethod
 
 class BaseSensor(nn.Module, ABC):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
     @property
@@ -12,10 +12,10 @@ class BaseSensor(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def forward(self, geometry_data, sensor_params, metadata):
+    def forward(self, geometry_data, sensor_params, metadata) -> dict:
         pass
 
-    def get_initial_params(self):
+    def get_initial_params(self) -> torch.Tensor:
         """
         Returns the initial guess for this sensor's parameters.
         Default: Vector of zeros.
@@ -24,10 +24,10 @@ class BaseSensor(nn.Module, ABC):
         return torch.zeros(self.num_params, dtype=torch.float64)
 
 class DopplerSensor(BaseSensor):
-    def __init__(self, station_teme_pos, station_teme_vel, center_freq, num_passes, fit_center_freq=False):
+    def __init__(self, station_teme_pos, station_teme_vel, center_freq, num_passes, fit_center_freq=False) -> None:
         super().__init__()
-        self.register_buffer('station_pos', station_teme_pos)
-        self.register_buffer('station_vel', station_teme_vel)
+        self.register_buffer(name='station_pos', tensor=station_teme_pos)
+        self.register_buffer(name='station_vel', tensor=station_teme_vel)
         self.nominal_freq = center_freq
         self.fit_fc = fit_center_freq
         self.n_passes = num_passes
@@ -36,15 +36,15 @@ class DopplerSensor(BaseSensor):
         self._n_params = num_passes + (1 if fit_center_freq else 0)
 
     @property
-    def num_params(self):
+    def num_params(self) -> int:
         return self._n_params
 
-    def get_initial_params(self):
+    def get_initial_params(self) -> torch.Tensor:
         # Biases start at 0.0
         # Freq offset starts at 0.0 (since we model it as delta from nominal)
         return torch.zeros(self.num_params, dtype=torch.float64)
 
-    def forward(self, geometry_data, sensor_params, contact_indices):
+    def forward(self, geometry_data, sensor_params, contact_indices) -> torch.Tensor:
         # 1. Physics: Range Rate
         # Note: We re-calculate relative kinematics here to support per-sensor timestamps
         sat_pos = geometry_data['pos']
@@ -81,16 +81,16 @@ class DopplerSensor(BaseSensor):
         return doppler_ideal
 
 class RadarSensor(BaseSensor):
-    def __init__(self, station_teme_pos, num_passes):
+    def __init__(self, station_teme_pos, num_passes) -> None:
         super().__init__()
-        self.register_buffer('station_pos', station_teme_pos)
+        self.register_buffer(name='station_pos', tensor=station_teme_pos)
         self.n_passes = num_passes
 
     @property
-    def num_params(self):
+    def num_params(self) -> int:
         return self.n_passes
     
-    def forward(self, geometry_data, sensor_params, contact_indices):
+    def forward(self, geometry_data, sensor_params, contact_indices) -> torch.Tensor:
         sat_pos = geometry_data['pos']
         rel_pos = sat_pos - self.station_pos
         
