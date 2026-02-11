@@ -28,15 +28,15 @@ stations = [
 
 # Mock Data (N=1000 measurements)
 # Timestamps (seconds from epoch)
-t_obs = torch.linspace(0, 6000, 100000)
+t_obs = torch.linspace(0, 6000, 1000)
 # Station ID for each measurement (0=Tromso, 1=Svalbard)
-st_indices = torch.zeros(100000, dtype=torch.int32)
+st_indices = torch.zeros(1000, dtype=torch.int32)
 st_indices[500:] = 1
 # Pass ID for biases (0=Pass1, 1=Pass2)
-pass_indices = torch.zeros(100000, dtype=torch.int32)
+pass_indices = torch.zeros(1000, dtype=torch.int32)
 pass_indices[200:] = 1
 pass_indices[500:] = 2
-pass_indices[4000:] = 3
+pass_indices[400:] = 3
 
 # 2. Define State Vector
 # ---------------------------------------------------------
@@ -68,7 +68,7 @@ print(x0)
 
 station_pos, station_vel = gse.propagate_stations(stations, t_obs, st_indices)
 
-expected = 100000 * torch.sin(t_obs)
+expected = 1000 * torch.sin(t_obs)
 
 
 def objective(x):
