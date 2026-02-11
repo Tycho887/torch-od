@@ -68,21 +68,19 @@ class StateDefinition:
         # We wrap in `with torch.no_grad()` to ensure x0 is a leaf node initialization
         with torch.no_grad():
             if "mean_motion" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["mean_motion"]] = self.init_tle.mean_motion
+                x0[self.map_param_to_idx["mean_motion"]] = self.init_tle._no_kozai
             if "eccentricity" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["eccentricity"]] = self.init_tle.eccentricity
+                x0[self.map_param_to_idx["eccentricity"]] = self.init_tle._ecco
             if "inclination" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["inclination"]] = self.init_tle.inclination
+                x0[self.map_param_to_idx["inclination"]] = self.init_tle._inclo
             if "raan" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["raan"]] = self.init_tle.raan
+                x0[self.map_param_to_idx["raan"]] = self.init_tle._nodeo
             if "argument_of_perigee" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["argument_of_perigee"]] = (
-                    self.init_tle.argument_of_perigee
-                )
+                x0[self.map_param_to_idx["argument_of_perigee"]] = self.init_tle._argpo
             if "mean_anomaly" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["mean_anomaly"]] = self.init_tle.mean_anomaly
+                x0[self.map_param_to_idx["mean_anomaly"]] = self.init_tle._mo
             if "b_star" in self.map_param_to_idx:
-                x0[self.map_param_to_idx["b_star"]] = self.init_tle.b_star
+                x0[self.map_param_to_idx["b_star"]] = self.init_tle._bstar
 
         return x0
 

@@ -1,89 +1,129 @@
+import copy
+
 import torch
+from dsgp4.sgp4init import sgp4, sgp4init
 from dsgp4.tle import TLE
-from dsgp4.sgp4init import sgp4init, sgp4
-from dsgp4.util import get_gravity_constants
+from dsgp4.util import from_datetime_to_mjd, get_gravity_constants
 
 
-from .state import StateDefinition
-
-
-def extract_orbit_params(tle: TLE) -> dict[str, torch.Tensor | float | int]:
+def get_tle_epoch_unix(tle: TLE) -> float:
     """
-    Helper to convert a TLE object into a dictionary of parameters.
-    This is used to populate 'static_tle_params' and can be reused in unpacking.
+    Extracts the TLE epoch and converts it to UNIX seconds since 1970-01-01.
     """
-    return {
-        "satellite_catalog_number": tle.satellite_catalog_number,
-        "epoch_year": tle.epoch_year,
-        "epoch_days": tle.epoch_days,
-        "b_star": tle._bstar,
-        "mean_motion": tle.mean_motion,
-        "eccentricity": tle.eccentricity,
-        "inclination": tle.inclination,
-        "raan": tle.raan,
-        "argument_of_perigee": tle.argument_of_perigee,
-        "mean_anomaly": tle.mean_anomaly,
-        "mean_motion_first_derivative": tle.mean_motion_first_derivative,
-        "mean_motion_second_derivative": tle.mean_motion_second_derivative,
-        "classification": tle.classification,
-        "ephemeris_type": tle.ephemeris_type,
-        "international_designator": tle.international_designator,
-        "revolution_number_at_epoch": tle.revolution_number_at_epoch,
-        "element_number": tle.element_number,
-    }
+    tle_epoch_mjd = from_datetime_to_mjd(datetime_obj=tle._epoch)
+    return (tle_epoch_mjd - 40587.0) * 86400.0
 
 
+def val(key, default, state_def, x):
+    if state_def and key in state_def.map_param_to_idx:
+        return x[state_def.map_param_to_idx[key]]
+    else:
+        return default
 
-def update(tle: TLE, state_def: StateDefinition, x: torch.Tensor, gravity_constant_name: str = "WGS84") -> TLE:
+
+def propagate(
+    tle: TLE,
+    timestamps: torch.Tensor,
+    x: torch.Tensor | None = None,
+    state_def=None,
+    gravity_constant: str = "wgs-84",
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Constructs a NEW TLE object using values from x_state where applicable,
-    and falling back to init_tle for static parameters.
+    Unified propagation function.
 
-    This maintains the computational graph because we pass the 'x' tensors
-    directly into the dictionary used to initialize the TLE.
+    Args:
+        tle: Base TLE object.
+        timestamps: (N,) Tensor of UNIX seconds.
+        x: (Optional) State vector tensor. If provided, enables gradients.
+        state_def: (Optional) Mapping for the state vector.
+        gravity_constant: Gravity model name.
+
+    Returns:
+        pos: (N, 3) TEME Position (km)
+        vel: (N, 3) TEME Velocity (km/s)
     """
 
-    # Helper to decide: Get from Tensor (Optimization) OR Get from Object (Static)
-    def get_val(key, default_val) -> torch.Tensor:
-        if key in state_def.map_param_to_idx:
-            idx = state_def.map_param_to_idx[key]
-            return x[idx]  # This is a Tensor, keeps Grad!
-        return default_val
+    # 1. Time Setup (UNIX -> Minutes since TLE Epoch)
+    tle_epoch = get_tle_epoch_unix(tle)
+    tsince_min = (timestamps - tle_epoch) / 60.0
 
-    # 1. Construct the Dictionary with mixed Tensor/Float values
-    arguments = {
-        # --- Dynamic Parameters (Potentially Tensors) ---
-        "mean_motion": get_val(key="mean_motion", default_val=tle.mean_motion),
-        "eccentricity": get_val(key="eccentricity", default_val=tle.eccentricity),
-        "inclination": get_val(key="inclination", default_val=tle.inclination),
-        "raan": get_val(key="raan", default_val=tle.raan),
-        "argument_of_perigee": get_val(key="argument_of_perigee", default_val=tle.argument_of_perigee),
-        "mean_anomaly": get_val(key="mean_anomaly", default_val=tle.mean_anomaly),
-        "b_star": get_val(key="b_star", default_val=tle.bstar),
-        # --- Static Parameters (Pass-through) ---
-        "satellite_catalog_number": tle.satellite_catalog_number,
-        "epoch_year": tle.epoch_year,
-        "epoch_days": tle.epoch_days,
-        "mean_motion_first_derivative": tle.mean_motion_first_derivative,
-        "mean_motion_second_derivative": tle.mean_motion_second_derivative,
-        "classification": tle.classification,
-        "ephemeris_type": tle.ephemeris_type,
-        "international_designator": tle.international_designator,
-        "revolution_number_at_epoch": tle.revolution_number_at_epoch,
-        "element_number": tle.element_number,
-    }
+    # Handle batch dimension for dSGP4 (1, N)
+    if tsince_min.ndim == 1:
+        tsince_min = tsince_min.unsqueeze(0)
 
-    # 2. Return a fresh TLE object
-    # dSGP4 will store the tensors inside. When you call propagate() on this object,
-    # the operations will trace back to x_state.
-    tle_new = TLE(data=arguments)
+    # 2. TLE Setup (Static vs Differentiable)
+    if x is None:
+        sat_obj = tle
+    else:
+        # Create a shallow copy so we don't mutate the original TLE
+        # during the in-place sgp4init process
+        # sat_obj = copy.copy(tle)
 
-    whichconst = get_gravity_constants(gravity_constant_name=gravity_constant_name)
+        print(tle)
 
-    sgp4init(
-    whichconst=whichconst, opsmode="i", satn=tle_new.satellite_catalog_number,
-    epoch=(tle_new._jdsatepoch + tle_new._jdsatepochF) - 2433281.5,
-    xbstar=tle_new._bstar, xndot=tle_new._ndot, xnddot=tle_new._nddot,
-    xecco=tle_new._ecco, xargpo=tle_new._argpo, xinclo=tle_new._inclo,
-    xmo=tle_new._mo, xno_kozai=tle_new._no_kozai, xnodeo=tle_new._nodeo, satellite=tle_new,
-    )
+        arguments = {
+            # --- Dynamic Parameters (Potentially Tensors) ---
+            "mean_motion": float(
+                val("mean_motion", tle._no_kozai, state_def, x).detach() / 60
+            ),
+            "eccentricity": float(
+                val("eccentricity", tle._ecco, state_def, x).detach()
+            ),
+            "inclination": float(val("inclination", tle._inclo, state_def, x).detach()),
+            "raan": float(val("raan", tle._nodeo, state_def, x).detach()),
+            "argument_of_perigee": float(
+                val("argument_of_perigee", tle._argpo, state_def, x).detach()
+            ),
+            "mean_anomaly": float(val("mean_anomaly", tle._mo, state_def, x).detach()),
+            "b_star": float(val("b_star", tle._bstar, state_def, x).detach()),
+            # --- Static Parameters (Pass-through) ---
+            "satellite_catalog_number": tle.satellite_catalog_number,
+            "epoch_year": tle.epoch_year,
+            "epoch_days": tle.epoch_days,
+            "mean_motion_first_derivative": tle.mean_motion_first_derivative,
+            "mean_motion_second_derivative": tle.mean_motion_second_derivative,
+            "classification": tle.classification,
+            "ephemeris_type": tle.ephemeris_type,
+            "international_designator": tle.international_designator,
+            "revolution_number_at_epoch": tle.revolution_number_at_epoch,
+            "element_number": tle.element_number,
+        }
+
+        # 2. Return a fresh TLE object
+        # dSGP4 will store the tensors inside. When you call propagate() on this object,
+        # the operations will trace back to x_state.
+        sat_obj = TLE(arguments)
+
+        # 3. Differentiable Initialization (Graph Access)
+        # We pass the tensors directly into sgp4init.
+        # This records the operations (constants calculation) on the graph.
+        whichconst = get_gravity_constants(gravity_constant)
+
+        sgp4init(
+            whichconst=whichconst,
+            opsmode="i",
+            satn=sat_obj.satellite_catalog_number,
+            epoch=(sat_obj._jdsatepoch + sat_obj._jdsatepochF) - 2433281.5,
+            xbstar=val("b_star", sat_obj._bstar, state_def, x),
+            xndot=sat_obj._ndot,
+            xnddot=sat_obj._nddot,
+            xecco=val("eccentricity", sat_obj._ecco, state_def, x),
+            xargpo=val("argument_of_perigee", sat_obj._argpo, state_def, x),
+            xinclo=val("inclination", sat_obj._inclo, state_def, x),
+            xmo=val("mean_anomaly", sat_obj._mo, state_def, x),
+            xno_kozai=val("mean_motion", sat_obj._no_kozai, state_def, x),
+            xnodeo=val("raan", sat_obj._nodeo, state_def, x),
+            satellite=sat_obj,
+        )
+
+        print(sat_obj)
+
+    # 4. Propagation
+    # Returns (Batch, Time, 2, 3)
+    state = sgp4(sat_obj, tsince_min)
+
+    # 5. Unpack to (N, 3)
+    pos = state[:, 0]
+    vel = state[:, 1]
+
+    return pos, vel
