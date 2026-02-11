@@ -100,20 +100,21 @@ class StateDefinition:
                 return x_state[idx]  # This is a Tensor, keeps Grad!
             return default_val
 
-        # 1. Construct the Dictionary with mixed Tensor/Float values
         arguments = {
             # --- Dynamic Parameters (Potentially Tensors) ---
-            "mean_motion": get_val("mean_motion", self.init_tle.mean_motion),
-            "eccentricity": get_val("eccentricity", self.init_tle.eccentricity),
-            "inclination": get_val("inclination", self.init_tle.inclination),
-            "raan": get_val("raan", self.init_tle.raan),
-            "argument_of_perigee": get_val(
-                "argument_of_perigee", self.init_tle.argument_of_perigee
+            "mean_motion": float(
+                get_val("mean_motion", self.init_tle._no_kozai).detach() / 60
             ),
-            "mean_anomaly": get_val("mean_anomaly", self.init_tle.mean_anomaly),
-            "b_star": get_val(
-                "b_star", self.init_tle.bstar
-            ),  # Note: TLE usually stores this as _bstar or bstar depending on version
+            "eccentricity": float(
+                get_val("eccentricity", self.init_tle._ecco).detach()
+            ),
+            "inclination": float(get_val("inclination", self.init_tle._inclo).detach()),
+            "raan": float(get_val("raan", self.init_tle._nodeo).detach()),
+            "argument_of_perigee": float(
+                get_val("argument_of_perigee", self.init_tle._argpo).detach()
+            ),
+            "mean_anomaly": float(get_val("mean_anomaly", self.init_tle._mo).detach()),
+            "b_star": float(get_val("b_star", self.init_tle._bstar).detach()),
             # --- Static Parameters (Pass-through) ---
             "satellite_catalog_number": self.init_tle.satellite_catalog_number,
             "epoch_year": self.init_tle.epoch_year,

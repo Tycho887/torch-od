@@ -4,6 +4,7 @@ import dsgp4
 import torch
 from dsgp4.newton_method import newton_method
 from dsgp4.tle import TLE
+from torch.func import jacfwd
 
 import diffod.gse as gse
 import diffod.physics as physics
@@ -33,7 +34,8 @@ st_indices = torch.zeros(1000, dtype=torch.int32)
 st_indices[500:] = 1
 # Pass ID for biases (0=Pass1, 1=Pass2)
 pass_indices = torch.zeros(1000, dtype=torch.int32)
-pass_indices[500:] = 1
+pass_indices[200:] = 1
+pass_indices[500:] = 2
 
 # 2. Define State Vector
 # ---------------------------------------------------------
@@ -42,12 +44,12 @@ sv_def = state.StateDefinition(
     init_tle=init_tle,
     num_measurements=1000,
     fit_ma=True,
-    fit_mean_motion=True,
-    fit_argp=True,
-    fit_bstar=True,
-    fit_eccentricity=True,
-    fit_inclination=True,
-    fit_raan=True,
+    fit_mean_motion=False,
+    fit_argp=False,
+    fit_bstar=False,
+    fit_eccentricity=False,
+    fit_inclination=False,
+    fit_raan=False,
 )
 
 # Add Pass Biases
@@ -63,6 +65,28 @@ H_bias = sv_def.get_bias_matrix("doppler_bias")
 
 print(x0)
 
-pos, vel = propagate(tle=init_tle, timestamps=t_obs, x=x0, state_def=sv_def)
+station_pos, station_vel = gse.propagate_stations(stations, t_obs, st_indices)
 
-print(pos.shape, vel.shape)
+expected = 1000 * torch.sin(t_obs)
+
+
+def objective(x):
+
+    pos, vel = propagate(tle=init_tle, timestamps=t_obs, x=x, state_def=sv_def)
+
+    measured = physics.compute_doppler(
+        sat_pos=pos,
+        sat_vel=vel,
+        st_pos=station_pos,
+        st_vel=station_vel,
+        center_freq=2.2e9,
+    )
+
+    residuals = measured - expected
+
+    return residuals
+
+
+H = jacfwd(objective)(x0)
+
+print(H)
