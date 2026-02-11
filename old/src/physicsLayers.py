@@ -2,6 +2,7 @@ import copy
 
 import torch
 import torch.nn as nn
+from dsgp4.sgp4_batched import sgp4_batched
 from dsgp4.sgp4init import sgp4, sgp4init
 from dsgp4.tle import TLE
 from dsgp4.util import get_gravity_constants
@@ -95,10 +96,6 @@ class SGP4Layer(nn.Module):
 
 
 # We want to restructure to have a physics layer: SGP4 -> Physics projections (Range, Doppler) -> Sensor models + Biases
-
-
-import torch
-import torch.nn as nn
 
 
 class GeometryLayer(nn.Module):

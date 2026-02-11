@@ -29,17 +29,15 @@ class BaseSensor(nn.Module, ABC):
 class DopplerSensor(BaseSensor):
     def __init__(
         self,
-        center_freq,
         num_passes,
-        station_teme_pos=None,
-        station_teme_vel=None,
+        center_freq,
         fit_center_freq=False,
         station_id=None,
     ) -> None:
         super().__init__()
-        if station_teme_pos is not None:
-            self.register_buffer(name="station_pos", tensor=station_teme_pos)
-            self.register_buffer(name="station_vel", tensor=station_teme_vel)
+        # if station_teme_pos is not None:
+        #     self.register_buffer(name="station_pos", tensor=station_teme_pos)
+        #     self.register_buffer(name="station_vel", tensor=station_teme_vel)
 
         self.station_id = station_id
         self.nominal_freq = center_freq
@@ -60,25 +58,8 @@ class DopplerSensor(BaseSensor):
 
     def forward(self, geometry_data, sensor_params, contact_indices) -> torch.Tensor:
         # 1. Physics: Range Rate
-        # Note: We re-calculate relative kinematics here to support per-sensor timestamps
-        # sat_pos = geometry_data["pos"]
-        # sat_vel = geometry_data["vel"]
 
-        # # Check for dynamic station state (from GroundStation module)
-        # if "station_pos" in geometry_data:
-        #     st_pos = geometry_data["station_pos"]
-        #     st_vel = geometry_data["station_vel"]
-        # else:
-        #     st_pos, st_vel = self.station_pos, self.station_vel
-
-        # rel_pos = sat_pos - st_pos
-        # rel_vel = sat_vel - st_vel
-
-        # dist = rel_pos.norm(dim=1, keepdim=True) + 1e-9
-        # los_vec = rel_pos / dist
-        # range_rate = (rel_vel * los_vec).sum(dim=1).view(-1)  # (N,)
-
-        range_rate = geometry_data["range_rate"]
+        assert torch.max(contact_indices) == self.n_passes
 
         # 2. Determine Effective Frequency
         # If we are fitting Fc, the last parameter is the correction (delta_hz)
@@ -91,17 +72,30 @@ class DopplerSensor(BaseSensor):
             delta_freq = sensor_params[-1]
             freq_to_use = freq_to_use + delta_freq
 
-        # 3. Ideal Doppler
+        range_rate = geometry_data["range_rate"]
+
+        print(f"range rate shape: {range_rate.shape}")
+        print(f"Pass biases shape: {pass_biases.shape}")
+
         c = 299792.458  # km/s
         doppler_ideal = -(range_rate / c) * freq_to_use
 
-        # 4. Apply Per-Pass Bias
-        # contact_indices maps measurement -> pass ID
-        if self.n_passes > 0:
-            bias_correction = pass_biases[contact_indices]
-            return doppler_ideal + bias_correction
+        # if contact_indices is not None and self.n_passes > 0:
+        # assert torch.max(contact_indices) == self.n_passes
 
-        return doppler_ideal
+        # 3. Ideal Doppler
+        # bias_correction = sensor_params[contact_indices]
+        return doppler_ideal + pass_biases
+        # else:
+        #     return doppler_ideal
+
+        # # 4. Apply Per-Pass Bias
+        # # contact_indices maps measurement -> pass ID
+        # if self.n_passes > 0:
+        #     bias_correction = pass_biases[contact_indices]
+        #     return doppler_ideal + bias_correction
+
+        # return doppler_ideal
 
 
 class RadarSensor(BaseSensor):
@@ -117,23 +111,12 @@ class RadarSensor(BaseSensor):
         return self.n_passes
 
     def forward(self, geometry_data, sensor_params, contact_indices) -> torch.Tensor:
-        # sat_pos = geometry_data["pos"]
-
-        # if "station_pos" in geometry_data:
-        #     st_pos = geometry_data["station_pos"]
-        # else:
-        #     st_pos = self.station_pos
-
-        # rel_pos = sat_pos - st_pos
-
-        # # 1. Ideal Range
-        # range_km = rel_pos.norm(dim=1).view(-1)
 
         range_km = geometry_data["range"]
 
-        # 2. Apply Bias
-        if self.n_passes > 0:
+        if contact_indices is not None and self.n_passes > 0:
+            assert torch.max(contact_indices) == self.n_passes
             bias_correction = sensor_params[contact_indices]
             return range_km + bias_correction
-
-        return range_km
+        else:
+            return range_km

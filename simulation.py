@@ -1,140 +1,107 @@
-import matplotlib.pyplot as plt
-import numpy as np
+# --- USER SCRIPT ---
+# Assume these modules are imported from the files above
+import dsgp4
 import torch
 from dsgp4.tle import TLE
 
-# Make sure to import the modules correctly based on file structure
-from src.groundStation import GroundStation
-from src.sensorLayers import DopplerSensor, RadarSensor
-from src.systemObject import BaseOrbitSystem
+import diffod.gse as gse
+import diffod.physics as physics
+import diffod.state as state
 
-# --- 2. Setup Scenario ---
+# 1. Setup Data
+# ---------------------------------------------------------
+# Load TLE
 TLE_list = [
     "ISS (ZARYA)",
     "1 25544U 98067A   26038.50283897  .00012054  00000-0  23050-3 0  9996",
     "2 25544  51.6315 221.5822 0011000  74.6214 285.5989 15.48462076551652",
 ]
 init_tle = TLE(data=TLE_list)
+# Create Stations
+stations = [
+    gse.GroundStation(name="Tromso", lat=69.6, lon=18.9, alt=0.1),
+    gse.GroundStation(name="Svalbard", lat=78.2, lon=15.4, alt=0.4),
+]
 
-# Time: 2000 steps
-N_STEPS = 2000
-t_start = 1762418742
-t_end = t_start + 86400  # 1 day
-t_all = torch.linspace(start=t_start, end=t_end, steps=N_STEPS)
+# Mock Data (N=1000 measurements)
+# Timestamps (seconds from epoch)
+t_obs = torch.linspace(0, 6000, 1000)
+# Station ID for each measurement (0=Tromso, 1=Svalbard)
+st_indices = torch.zeros(1000, dtype=torch.long)
+st_indices[500:] = 1
+# Pass ID for biases (0=Pass1, 1=Pass2)
+pass_indices = torch.zeros(1000, dtype=torch.long)
+pass_indices[500:] = 1
 
-# --- 3. Define Ground Station ---
-gs_main = GroundStation(
-    lat_deg=9.0, lon_deg=0.0, alt_km=0.0, epoch_tai=float(t_all[0]), station_id="GS_1"
-)
-ground_stations = {"GS_1": gs_main}
+# 2. Define State Vector
+# ---------------------------------------------------------
+# We want to fit Mean Motion (n) and Inclination (i)
+sv_def = state.StateDefinition(["mean_motion", "inclination"], num_measurements=1000)
 
-# --- 4. Define Sensors ---
-# Doppler: 2 passes (indices 0 and 1), fit center freq
-doppler_sensor = DopplerSensor(
-    center_freq=435e6, num_passes=2, fit_center_freq=True, station_id="GS_1"
-)
-# Radar: 2 passes
-radar_sensor = RadarSensor(num_passes=2, station_id="GS_1")
+# Add Pass Biases
+# This automatically resizes the state vector to include 2 bias parameters
+sv_def.add_linear_bias("doppler_bias", pass_indices)
 
-sensors = {"doppler": doppler_sensor, "radar": radar_sensor}
+# Initial Guess (x0)
+# We need to construct x0 based on the dimensions sv_def calculated
+x0 = torch.zeros(sv_def.current_dim, requires_grad=True)
+# Fill initial orbital values from TLE
+x0.data[0] = init_tle.mean_motion
+x0.data[1] = init_tle.inclination
+# Biases start at 0.0
 
-# --- 5. Define Observation Packets ---
-# FIX: Ensure indices match the time vector length (2000)
-# Previously this was 3000, causing shape mismatches or broadcasting errors.
-indices = torch.zeros(N_STEPS, dtype=torch.long)
-# Simulate a pass change halfway through
-indices[N_STEPS // 2 :] = 1
+# Pre-compute the selection matrix (Constant during optimization)
+H_bias = sv_def.get_bias_matrix("doppler_bias")
 
-print(indices)
 
-obs_data = {
-    "doppler": {"t": t_all, "indices": indices},
-    "radar": {"t": t_all, "indices": indices},
-}
+# 3. System Function (The Forward Pass)
+# ---------------------------------------------------------
+def system_model(x):
+    # A. Update TLE
+    # Create a dict of params, overriding the ones we are fitting
+    current_params = sv_def.unpack_tle_params(
+        x,
+        defaults={
+            "mean_motion": init_tle.mean_motion,
+            "inclination": init_tle.inclination,
+            "eccentricity": init_tle.eccentricity,
+            "raan": init_tle.raan,
+            "argp": init_tle.argument_of_perigee,
+            "ma": init_tle.mean_anomaly,
+            "bstar": init_tle.bstar,
+            # ... add others
+        },
+    )
 
-# --- 6. Build System ---
-system = BaseOrbitSystem(
-    init_tle=init_tle,
-    fit_keys=["n", "i"],
-    sensors_dict=sensors,
-    ground_stations=ground_stations,
-)
+    # B. Propagate Satellite
+    # Note: dSGP4 typically needs specific formatting, assume a helper exists
+    # or dSGP4 is modified to accept the dict/tensor directly.
+    # For this example, assuming dsgp4.propagate_batch accepts the dict
+    sat_pos_teme, sat_vel_teme = dsgp4.propagate_batch(current_params, t_obs)
 
-# --- 7. Jacobian Analysis ---
-x0 = system.state_def.get_initial_state()
-# Expected x0 layout (7 params):
-# Orbital: [n, i]
-# Doppler: [bias_0, bias_1, freq_bias]
-# Radar:   [bias_0, bias_1]
+    # C. Propagate Stations
+    # (Only depends on time and Earth rotation, not the satellite state)
+    st_pos_teme, st_vel_teme = gse.propagate_stations(stations, t_obs, st_indices)
 
-print("Computing Jacobian...")
-# BaseOrbitSystem handles batching.
-# Output Shape should be: (Total_Measurements, Total_Params) -> (4000, 7)
-H = system.get_jacobian(state_vector=x0, observations=obs_data)
+    # D. Compute Physics (Doppler)
+    center_freq = 2.2e9  # Hz
+    pred_doppler = physics.compute_doppler(
+        sat_pos_teme, sat_vel_teme, st_pos_teme, st_vel_teme, center_freq
+    )
 
-print(f"Jacobian shape: {H.shape}")
+    # E. Apply Biases
+    # Uses the sparse matrix H_bias we built earlier
+    final_pred = physics.apply_linear_bias(pred_doppler, x, H_bias)
 
-# --- 8. Forward Pass for Expected Values ---
-print("Computing Expected Values...")
-with torch.no_grad():
-    preds = system(x0, obs_data)
+    return final_pred
 
-# Split predictions: Order is sorted keys -> doppler, radar
-n_dop = len(obs_data["doppler"]["t"])
-dop_preds = preds[:n_dop].numpy()
-rad_preds = preds[n_dop:].numpy()
 
-# --- 9. Plotting ---
-t_plot = (t_all - t_all[0]).numpy() / 60.0  # Minutes
-param_names = ["n", "i", "Dop_B0", "Dop_B1", "Dop_Fc", "Rad_B0", "Rad_B1"]
+# 4. Jacobian & Optimization
+# ---------------------------------------------------------
+from torch.func import jacfwd
 
-fig, axs = plt.subplots(2, 2, figsize=(15, 10), sharex=True)
+# Compute Jacobian
+J = jacfwd(system_model)(x0)
 
-# 1. Top Left: Doppler Measurements
-axs[0, 0].plot(t_plot, dop_preds, label="Expected Doppler", color="b")
-axs[0, 0].set_title("Doppler Signal")
-axs[0, 0].set_ylabel("Frequency Shift (Hz)")
-axs[0, 0].grid(True)
-axs[0, 0].legend()
-
-# 2. Top Right: Radar Measurements
-axs[0, 1].plot(t_plot, rad_preds, label="Expected Range", color="orange")
-axs[0, 1].set_title("Radar Range")
-axs[0, 1].set_ylabel("Range (km)")
-axs[0, 1].grid(True)
-axs[0, 1].legend()
-
-# 3. Bottom Left: Doppler Sensitivities (Log Scale)
-# H rows 0:n_dop correspond to Doppler
-H_dop = H[:n_dop, :].detach().numpy()
-for i, name in enumerate(param_names):
-    # Plot magnitude
-    sensitivity = np.abs(H_dop[:, i])
-    # Add small epsilon to avoid log(0)
-    axs[1, 0].plot(t_plot, sensitivity + 1e-12, label=f"d(Dop)/d({name})")
-
-axs[1, 0].set_yscale("log")
-axs[1, 0].set_title("Doppler Sensitivities (Log Magnitude)")
-axs[1, 0].set_ylabel("|Gradient|")
-axs[1, 0].set_xlabel("Time (min)")
-axs[1, 0].grid(True, which="both", linestyle="--", alpha=0.7)
-# Place legend outside to avoid clutter
-axs[1, 0].legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize="small")
-
-# 4. Bottom Right: Radar Sensitivities (Log Scale)
-# H rows n_dop:end correspond to Radar
-H_rad = H[n_dop:, :].detach().numpy()
-for i, name in enumerate(param_names):
-    sensitivity = np.abs(H_rad[:, i])
-    axs[1, 1].plot(t_plot, sensitivity + 1e-12, label=f"d(Rad)/d({name})")
-
-axs[1, 1].set_yscale("log")
-axs[1, 1].set_title("Radar Sensitivities (Log Magnitude)")
-axs[1, 1].set_ylabel("|Gradient|")
-axs[1, 1].set_xlabel("Time (min)")
-axs[1, 1].grid(True, which="both", linestyle="--", alpha=0.7)
-axs[1, 1].legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize="small")
-
-plt.tight_layout()
-plt.savefig("simulation_results.png")
-print("Plot saved to simulation_results.png")
+print(f"Jacobian Shape: {J.shape}")
+# Should be (1000, 4) -> (N_meas, [n, i, bias_pass_0, bias_pass_1])

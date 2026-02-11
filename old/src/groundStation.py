@@ -43,13 +43,19 @@ class GroundStation(nn.Module):
 
         # 1. High-Precision ECEF Conversion (Static)
         # This runs once on CPU during setup
-        loc = EarthLocation(
-            lat=lat_deg * u.deg, lon=lon_deg * u.deg, height=alt_km * u.km
+        loc = EarthLocation(  # pyright: ignore[reportPossiblyUnboundVariable]
+            lat=lat_deg * u.deg,  # pyright: ignore[reportPossiblyUnboundVariable]
+            lon=lon_deg * u.deg,  # pyright: ignore[reportPossiblyUnboundVariable]
+            height=alt_km * u.km,  # pyright: ignore[reportPossiblyUnboundVariable]
         )
 
         # Convert to km and store as a registered buffer (moves to GPU automatically)
         xyz = np.array(
-            object=[loc.x.to(u.km).value, loc.y.to(u.km).value, loc.z.to(u.km).value]
+            object=[
+                loc.x.to(u.km).value,  # pyright: ignore[reportPossiblyUnboundVariable]
+                loc.y.to(u.km).value,  # pyright: ignore[reportPossiblyUnboundVariable]
+                loc.z.to(u.km).value,  # pyright: ignore[reportPossiblyUnboundVariable]
+            ]
         )
         self.register_buffer(
             name="pos_ecef", tensor=torch.tensor(data=xyz, dtype=torch.float64)
@@ -73,10 +79,10 @@ class GroundStation(nn.Module):
         # Calculate GMST at this epoch using Astropy
         # Convert TAI seconds (since 1970) to MJD TAI
         mjd_tai = 40587.0 + (epoch_tai / 86400.0)
-        t = Time(mjd_tai, format="mjd", scale="tai")
+        t = Time(mjd_tai, format="mjd", scale="tai")  # pyright: ignore[reportPossiblyUnboundVariable]
 
         # SGP4 TEME is aligned with GMST
-        self.gmst0 = t.sidereal_time("mean", "greenwich").to(u.rad).value
+        self.gmst0 = t.sidereal_time("mean", "greenwich").to(u.rad).value  # pyright: ignore[reportPossiblyUnboundVariable]
 
     def forward(self, t_tai: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """

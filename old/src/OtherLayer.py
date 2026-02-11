@@ -35,7 +35,7 @@ class SensorStack(nn.Module):
             # 3. Get Pass Indices (User provided metadata)
             # These are strictly 0, 1, 2... referring to the bias index
             obs_packet = observations[name]
-            pass_indices = obs_packet.get("indices", None)
+            pass_indices = obs_packet.get("pass_indices", None)
 
             # --- SAFETY CHECK ---
             # Ensure the user didn't request Pass #5 for a sensor with only 2 passes
@@ -49,7 +49,14 @@ class SensorStack(nn.Module):
 
             # 4. Sensor Forward
             pred = sensor(sensor_geometry, params, pass_indices)
+
+            print(f"The predicted shape is: {pred.shape}")
+
             results.append(pred)
+
+        print("The length is:", len(results))
+        print("The shape is:", (results[0].shape))
+        print("The shape is:", (results[1].shape))
 
         return torch.cat(results)
 
