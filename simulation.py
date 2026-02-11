@@ -28,14 +28,15 @@ stations = [
 
 # Mock Data (N=1000 measurements)
 # Timestamps (seconds from epoch)
-t_obs = torch.linspace(0, 6000, 1000)
+t_obs = torch.linspace(0, 6000, 100000)
 # Station ID for each measurement (0=Tromso, 1=Svalbard)
-st_indices = torch.zeros(1000, dtype=torch.int32)
+st_indices = torch.zeros(100000, dtype=torch.int32)
 st_indices[500:] = 1
 # Pass ID for biases (0=Pass1, 1=Pass2)
-pass_indices = torch.zeros(1000, dtype=torch.int32)
+pass_indices = torch.zeros(100000, dtype=torch.int32)
 pass_indices[200:] = 1
 pass_indices[500:] = 2
+pass_indices[4000:] = 3
 
 # 2. Define State Vector
 # ---------------------------------------------------------
@@ -61,13 +62,13 @@ sv_def.add_linear_bias("doppler_bias", pass_indices)
 x0 = sv_def.get_initial_state()
 
 # Pre-compute the selection matrix (Constant during optimization)
-H_bias = sv_def.get_bias_matrix("doppler_bias")
+# H_bias = sv_def.get_bias_matrix("doppler_bias")
 
 print(x0)
 
 station_pos, station_vel = gse.propagate_stations(stations, t_obs, st_indices)
 
-expected = 1000 * torch.sin(t_obs)
+expected = 100000 * torch.sin(t_obs)
 
 
 def objective(x):
@@ -82,11 +83,22 @@ def objective(x):
         center_freq=2.2e9,
     )
 
-    residuals = measured - expected
+    observed = physics.apply_linear_bias(
+        measured, x, sv_def.get_bias_map("doppler_bias")
+    )
+
+    residuals = observed - expected
 
     return residuals
 
 
+import time
+
+t0 = time.time()
+
 H = jacfwd(objective)(x0)
+t1 = time.time()
+# H = torch.autograd.functional.jacobian(objective, x0)
 
 print(H)
+print(f"Time taken: {t1 - t0:.4f}")

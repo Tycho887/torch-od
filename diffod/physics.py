@@ -36,11 +36,42 @@ def compute_range(sat_pos, st_pos):
     return torch.norm(sat_pos - st_pos, dim=1)
 
 
-def apply_linear_bias(observations, x_state, bias_matrix):
+def apply_linear_bias(observations, x_state, bias_map):
     """
-    Applies additive bias: y_pred = y_phys + H @ x
+    Applies additive bias using indexing (Gather).
+
+    Args:
+        observations: (N,) Tensor of computed observations.
+        x_state:      (M,) The full state vector.
+        bias_map:     Dict containing 'indices' (N,) and 'offset' (int).
     """
-    # Sparse Matrix-Vector Multiplication
-    # (N, P) @ (P, 1) -> (N, 1)
-    bias_correction = torch.sparse.mm(bias_matrix, x_state.unsqueeze(1)).squeeze()
+    if bias_map is None:
+        return observations
+
+    indices = bias_map["indices"]
+    offset = bias_map["offset"]
+
+    # 1. Handle "No Bias" entries (indicated by -1)
+    # Create a mask of which observations actually have this bias
+    mask = indices >= 0
+
+    # 2. Calculate the correction
+    # We initialize a zero-tensor so observations with index -1 get +0.0
+    bias_correction = torch.zeros_like(observations)
+
+    if mask.any():
+        # A. Get the valid group IDs
+        valid_group_ids = indices[mask]
+
+        # B. Shift them to absolute positions in the state vector 'x'
+        # e.g., if biases start at index 10, group 0 is at x[10]
+        abs_indices = valid_group_ids + offset
+
+        # C. Gather the values from x_state
+        # This operation is fully supported by jacfwd
+        bias_values = x_state[abs_indices]
+
+        # D. Assign back to the correction vector
+        bias_correction[mask] = bias_values
+
     return observations + bias_correction

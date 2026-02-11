@@ -54,8 +54,8 @@ class StateDefinition:
             self.current_dim += 1
 
         # Storage for bias matrices
-        self.bias_matrices = {}
-        self.bias_slices = {}
+        self.bias_maps = {}
+        # self.bias_slices = {}
 
     def get_initial_state(self):
         """
@@ -135,39 +135,28 @@ class StateDefinition:
 
     def add_linear_bias(self, name: str, group_indices: torch.Tensor):
         """
-        (Same as previous logic)
-        Adds bias parameters to the state vector based on grouping.
+        Registers a bias parameter group.
+        Stores the indices directly for efficient gathering later.
         """
-        # Calculate how many new params we need
-        # e.g. group_indices has max value 5 -> we need 6 params (0..5)
-        if group_indices.max() < 0:
-            return  # No valid groups
+        # 1. Determine size
+        # Assuming -1 is used for "no bias", we filter those out for counting
+        valid_indices = group_indices[group_indices >= 0]
+        if valid_indices.numel() == 0:
+            return
 
-        num_new_params = group_indices.max().item() + 1
+        num_new_params = valid_indices.max().item() + 1
 
+        # 2. Assign state vector slots
         start_idx = self.current_dim
         self.current_dim += num_new_params
 
-        # Store where in 'x' these biases live
-        self.bias_slices[name] = slice(start_idx, self.current_dim)
+        # 3. Store the mapping info
+        # We need the indices and the start_idx to locate params in 'x' later
+        self.bias_maps[name] = {
+            "indices": group_indices,  # Shape (N,)
+            "offset": start_idx,  # Integer scalar
+        }
 
-        # Build Sparse Matrix
-        valid_mask = group_indices >= 0
-        row_indices = torch.nonzero(valid_mask).squeeze()
-        col_indices = start_idx + group_indices[valid_mask]
-
-        indices = torch.stack([row_indices, col_indices])
-        values = torch.ones(row_indices.shape[0], dtype=torch.float32)
-
-        self.bias_matrices[name] = {"indices": indices, "values": values}
-
-    def get_bias_matrix(self, name, device="cpu"):
-        if name not in self.bias_matrices:
-            return None
-        data = self.bias_matrices[name]
-        return torch.sparse_coo_tensor(
-            data["indices"],
-            data["values"],
-            size=(self.num_measurements, self.current_dim),
-            device=device,
-        )
+    def get_bias_map(self, name):
+        """Returns the mapping data needed for physics.apply_linear_bias"""
+        return self.bias_maps.get(name, None)
