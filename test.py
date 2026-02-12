@@ -93,7 +93,7 @@ def run_reference():
 def run_functional():
     # Ensure inputs are on the correct device
     return sgp4_propagate(
-        consts=consts,
+        # consts=consts,
         tsince=tsince,
         bstar=init_tle._bstar.to(device),
         ndot=init_tle._ndot.to(device),
@@ -114,7 +114,7 @@ compiled_sgp4 = torch.compile(sgp4_propagate, mode="reduce-overhead")
 
 def run_compiled():
     return compiled_sgp4(
-        consts=consts,
+        # consts=consts,
         tsince=tsince,
         bstar=init_tle._bstar.to(device),
         ndot=init_tle._ndot.to(device),
