@@ -2,7 +2,7 @@
 import torch
 from dsgp4.newton_method import newton_method
 from dsgp4.tle import TLE
-from diffod.functional.sgp4 import dsgp4
+from diffod.functional.sgp4 import sgp4_propagate
 
 
 # ---------------------------------------------------------
@@ -16,3 +16,19 @@ TLE_list = [
     "2 25544  51.6315 221.5822 0011000  74.6214 285.5989 15.48462076551652",
 ]
 init_tle = TLE(data=TLE_list)
+
+tsince = torch.linspace(0,100,1000)
+
+r, v = sgp4_propagate(tsince=tsince,
+                      bstar=init_tle._bstar,
+                      ndot=init_tle._ndot,
+                      nddot=init_tle._nddot,
+                      ecco=init_tle._ecco,
+                      argpo=init_tle._argpo,
+                      inclo=init_tle._inclo,
+                      mo=init_tle._mo,
+                      no_kozai=init_tle._no_kozai,
+                      nodeo=init_tle._nodeo)
+
+print(r)
+print(v)

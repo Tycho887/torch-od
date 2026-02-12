@@ -2,22 +2,118 @@ import torch
 import numpy as np
 from typing import NamedTuple
 
-# You will need to ensure initl is functional (tensor in -> tensor out)
-from .initl import initl 
-
 class GravConsts(NamedTuple):
-    """Gravitational constants (e.g. WGS-72, WGS-84)."""
-    tumin: float
-    mu: float
-    radiusearthkm: float
-    xke: float
-    j2: float
-    j3: float
-    j4: float
-    j3oj2: float
+    """Gravitational constants WGS-84."""
+    mu: float     = 398600.5            #  in km3 / s2
+    radiusearthkm:float = 6378.137     #  km
+    xke:float    = 60.0 / np.sqrt(radiusearthkm*radiusearthkm*radiusearthkm/mu)
+    tumin: float  = 1.0 / xke
+    j2:float     =   0.00108262998905
+    j3:float     =  -0.00000253215306
+    j4:float     =  -0.00000161098761
+    j3oj2:float  =  j3 / j2
+
+def gstime_tensor(jdut1: torch.Tensor) -> torch.Tensor:
+    """
+    Computes Greenwich Sidereal Time (IAU formula) using pure tensors.
+    Inputs:
+        jdut1: Julian Date UT1 (days)
+    Returns:
+        gst: Greenwich Sidereal Time (radians)
+    """
+    deg2rad = torch.tensor(np.pi / 180.0, device=jdut1.device, dtype=jdut1.dtype)
+    twopi   = torch.tensor(2.0 * np.pi, device=jdut1.device, dtype=jdut1.dtype)
+    
+    tut1 = (jdut1 - 2451545.0) / 36525.0
+    
+    temp = -6.2e-6 * tut1**3 + 0.093104 * tut1**2 + \
+           (876600.0 * 3600 + 8640184.812866) * tut1 + 67310.54841
+           
+    # 360 deg = 86400 sec -> 1 deg = 240 sec
+    # temp is in seconds. Convert to radians.
+    # temp (sec) / 240.0 = deg
+    gst = (temp * deg2rad / 240.0) % twopi
+    return gst
+
+def initl(
+    xke: torch.Tensor,
+    j2: torch.Tensor,
+    ecco: torch.Tensor,
+    epoch: torch.Tensor,
+    inclo: torch.Tensor,
+    no: torch.Tensor,
+    opsmode: str, # Can be str ('a'/'i') or you could change to int/bool tensor
+    method: str = 'n',
+) -> tuple[torch.Tensor, str, torch.Tensor, torch.Tensor, torch.Tensor, 
+           torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, 
+           torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, 
+           torch.Tensor, torch.Tensor]:
+           
+    # Constants
+    x2o3   = torch.tensor(2.0 / 3.0, device=no.device, dtype=no.dtype)
+    twopi  = torch.tensor(2.0 * np.pi, device=no.device, dtype=no.dtype)
+
+    # Pre-compute eccentricity/inclination vars
+    eccsq  = ecco * ecco
+    omeosq = 1.0 - eccsq
+    rteosq = torch.sqrt(omeosq)
+    cosio  = torch.cos(inclo)
+    cosio2 = cosio * cosio
+
+    # Un-Kozai mean motion
+    ak   = torch.pow(xke / no, x2o3)
+    d1   = 0.75 * j2 * (3.0 * cosio2 - 1.0) / (rteosq * omeosq)
+    del_ = d1 / (ak * ak)
+    adel = ak * (1.0 - del_ * del_ - del_ *
+           (1.0 / 3.0 + 134.0 * del_ * del_ / 81.0))
+    del_ = d1 / (adel * adel)
+    no_unkozai = no / (1.0 + del_)
+
+    ao    = torch.pow(xke / no_unkozai, x2o3)
+    sinio = torch.sin(inclo)
+    po    = ao * omeosq
+    con42 = 1.0 - 5.0 * cosio2
+    con41 = -con42 - cosio2 - cosio2
+    ainv  = 1.0 / ao
+    posq  = po * po
+    rp    = ao * (1.0 - ecco)
+
+    # --- Mode A (AFSPC) Calculation ---
+    # gst time
+    ts70   = epoch - 7305.0
+    ds70   = torch.floor(ts70 + 1.0e-8)
+    tfrac  = ts70 - ds70
+    
+    c1     = torch.tensor(1.72027916940703639e-2, device=no.device, dtype=no.dtype)
+    thgr70 = torch.tensor(1.7321343856509374, device=no.device, dtype=no.dtype)
+    fk5r   = torch.tensor(5.07551419432269442e-15, device=no.device, dtype=no.dtype)
+    c1p2p  = c1 + twopi
+    
+    # Formula for Mode A
+    gsto_a = (thgr70 + c1 * ds70 + c1p2p * tfrac + ts70 * ts70 * fk5r) % twopi
+    # No need for `if gsto < 0: add 2pi` because % handles it.
+
+    # --- Mode I (Improved) Calculation ---
+    # Standard Gstime from JD
+    gsto_i = gstime_tensor(epoch + 2433281.5)
+
+    # --- Selection ---
+    # Create a mask. If opsmode is a string, we treat it as a constant for the batch 
+    # (or broadcast it). Ideally, pass opsmode as a boolean tensor for full safety.
+    # Here we handle the string case by creating a tensor scalar.
+    is_afspc = torch.tensor(opsmode == 'a', device=no.device)
+    
+    gsto = torch.where(is_afspc, gsto_a, gsto_i)
+
+    return (
+        no_unkozai,
+        method,
+        ainv, ao, con41, con42, cosio,
+        cosio2, eccsq, omeosq, posq,
+        rp, rteosq, sinio, gsto,
+    )
 
 def sgp4_propagate(
-    consts: GravConsts,
     tsince: torch.Tensor,
     bstar: torch.Tensor,
     ndot: torch.Tensor,
@@ -28,7 +124,8 @@ def sgp4_propagate(
     mo: torch.Tensor,
     no_kozai: torch.Tensor,
     nodeo: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    consts: GravConsts = GravConsts(),
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     A functional, JIT-compilable, vmap-friendly SGP4 propagator.
     
