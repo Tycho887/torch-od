@@ -1,9 +1,7 @@
 # --- USER SCRIPT ---
 # Assume these modules are imported from the files above
 import torch
-from dsgp4.newton_method import newton_method
 from dsgp4.tle import TLE
-# from dsgp4.mldsgp4 import mldsgp4
 from torch.func import jacfwd
 import time
 from diffod.layers import (
@@ -15,7 +13,6 @@ from diffod.layers import (
 )
 import diffod.gse as gse
 import diffod.state as state
-# from diffod.functional.tle import dsgp4, mldsgp4
 
 # ---------------------------------------------------------
 
@@ -36,15 +33,15 @@ stations = [
 
 # Mock Data (N=1000 measurements)
 # Timestamps (seconds from epoch)
-t_obs = torch.linspace(0, 6000, 10000)
+t_obs = torch.linspace(0, 6000, 100000)
 # Station ID for each measurement (0=Tromso, 1=Svalbard)
-st_indices = torch.zeros(10000, dtype=torch.int32)
-st_indices[500:] = 1
+st_indices = torch.zeros(100000, dtype=torch.int32)
+st_indices[5000:] = 1
 # Pass ID for biases (0=Pass1, 1=Pass2)
-pass_indices = torch.zeros(10000, dtype=torch.int32)
-pass_indices[2000:] = 1
-pass_indices[5000:] = 2
-pass_indices[4000:] = 3
+pass_indices = torch.zeros(100000, dtype=torch.int32)
+pass_indices[20000:] = 1
+pass_indices[50000:] = 2
+pass_indices[40000:] = 3
 
 # 2. Define State Vector
 # ---------------------------------------------------------
@@ -53,8 +50,8 @@ state_def = state.StateDefinition(
     init_tle=init_tle,
     num_measurements=1000,
     fit_ma=True,
-    fit_mean_motion=False,
-    fit_argp=False,
+    fit_mean_motion=True,
+    fit_argp=True,
     fit_bstar=False,
     fit_eccentricity=False,
     fit_inclination=False,
@@ -66,17 +63,17 @@ state_def = state.StateDefinition(
 state_def.add_linear_bias(name="doppler_bias", group_indices=pass_indices)
 
 # 1. Assemble Layers
-layer_sgp4 = SGP4Layer(init_tle, t_obs, state_def)
-layer_stat = StationLayer(stations, t_obs, st_indices)
+layer_sgp4 = SGP4Layer(timestamps=t_obs, state_def=state_def)
+layer_stat = StationLayer(stations=stations, timestamps=t_obs, station_indices=st_indices)
 layer_phys = DopplerPhysicsLayer(center_freq=2.2e9)
-layer_bias = BiasLayer(bias_group=state_def.get_bias_group("doppler_bias"))
+layer_bias = BiasLayer(bias_group=state_def.get_bias_group(name="doppler_bias"))
 
 # 2. Compile Model
 model = OrbitDeterminationModel(
-    layer_sgp4, 
-    layer_stat, 
-    layer_phys, 
-    layer_bias
+    sgp4_layer=layer_sgp4, 
+    station_layer=layer_stat, 
+    physics_layer=layer_phys, 
+    bias_layer=layer_bias
 )
 
 # 3. Functional Jacobian Calculation
@@ -85,7 +82,7 @@ x0 = state_def.get_initial_state()
 
 # Define the function for Jacobian
 # jacfwd expects f(x) -> y
-def functional_forward(x):
+def functional_forward(x) -> torch.Tensor:
     return model(x)
 t0 = time.time()
 # Compute Jacobian (N_obs, N_params)
@@ -100,65 +97,3 @@ print(f"Jacobian H shape: {H.shape}")
 print(H[:, :5])
 
 print(f"Time taken: {t1 - t0:.4f}")
-# # Initial Guess (x0)
-# # We need to construct x0 based on the dimensions sv_def calculated
-# x0 = sv_def.get_initial_state()
-
-# # Pre-compute the selection matrix (Constant during optimization)
-# # H_bias = sv_def.get_bias_matrix("doppler_bias")
-
-# t0 = time.time()
-
-# station_pos, station_vel = gse.propagate_stations(
-#     stations=stations, t_tai=t_obs, station_indices=st_indices
-# )
-
-# t1 = time.time()
-
-# print(f"Time taken: {t1 - t0:.4f}")
-# expected = 1000 * torch.sin(input=t_obs)
-
-
-# def objective(x):
-
-#     t0 = time.time()
-
-#     ml
-
-#     pos, vel = dsgp4(tle=init_tle, timestamps=t_obs, x=x, state_def=sv_def)
-
-#     t1 = time.time()
-
-#     print(f"Time taken: {t1 - t0:.4f}")
-
-#     t0 = time.time()
-
-#     measured = physics.compute_doppler(
-#         sat_pos=pos,
-#         sat_vel=vel,
-#         st_pos=station_pos,
-#         st_vel=station_vel,
-#         center_freq=2.2e9,
-#     )
-
-#     observed = physics.apply_linear_bias(
-#         measured, x, sv_def.get_bias_map("doppler_bias")
-#     )
-
-#     residuals = observed - expected
-
-#     t1 = time.time()
-
-#     print(f"Time taken: {t1 - t0:.4f}")
-
-#     return residuals
-
-
-# t0 = time.time()
-
-# H = jacfwd(func=objective)(x0)
-# t1 = time.time()
-# # H = torch.autograd.functional.jacobian(objective, x0)
-
-# print(H)
-# print(f"Time taken: {t1 - t0:.4f}")

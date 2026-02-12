@@ -36,8 +36,8 @@ def gstime_tensor(jdut1: torch.Tensor) -> torch.Tensor:
     return gst
 
 def initl(
-    xke: torch.Tensor,
-    j2: torch.Tensor,
+    xke: float,
+    j2: float,
     ecco: torch.Tensor,
     epoch: torch.Tensor,
     inclo: torch.Tensor,

@@ -1,32 +1,59 @@
 import torch
 import torch.nn as nn
-# from einops import rearrange, repeat
-from diffod.functional.tle import dsgp4
 from diffod.gse import propagate_stations
 from diffod.physics import apply_linear_bias
+from diffod.functional.sgp4 import sgp4_propagate
+from diffod.utils import BiasGroup
+
+# Ensure this matches the definition in your functional implementation
+class GravConsts:
+    tumin = 1.0 / 13.446839
+    mu = 398600.8
+    radiusearthkm = 6378.135
+    xke = 0.0743669161
+    j2 = 0.001082616
+    j3 = -0.00000253881
+    j4 = -0.00000165597
+    j3oj2 = j3 / j2
 
 class SGP4Layer(nn.Module):
-    def __init__(self, base_tle, timestamps, state_def) -> None:
+    def __init__(self, timestamps: torch.Tensor, state_def) -> None:
         """
         Layer 1: Maps State Vector -> Satellite Kinematics (TEME)
+        
+        Args:
+            timestamps: Tensor (N,) of 'time since epoch' in minutes.
+            state_def: StateDefinition object containing TLE metadata and mapping.
         """
         super().__init__()
-        self.base_tle = base_tle
-        self.register_buffer(name='timestamps', tensor=timestamps) # Static (N,)
-        self.state_def = state_def # Metadata for mapping x -> TLE
+        # Register timestamps as a buffer so they are moved to device automatically
+        # but not treated as a learnable parameter.
+        self.register_buffer('tsince', timestamps) 
+        self.state_def = state_def
+        self.consts = GravConsts()
 
     def forward(self, x_full) -> tuple[torch.Tensor, torch.Tensor]:
-        # 1. Extract Orbital Elements (active) from State Vector
-        # The propagate function now handles the mixing of static/active params
-        pos, vel = dsgp4(
-            tle=self.base_tle, 
-            timestamps=self.timestamps,        # pyright: ignore[reportArgumentType]
-            x=x_full, 
-            state_def=self.state_def
+        """
+        Propagates SGP4 using the functional implementation.
+        """
+        # 1. Prepare Arguments
+        # Extracts tensors from x_full for active params, and static tensors for others
+        sgp4_args = self.state_def.get_functional_args(x_full)
+        
+        # 2. Functional Propagation
+        # We unpack (**sgp4_args) into the function.
+        # This is compatible with torch.compile / torch.jit
+        pos, vel = sgp4_propagate(
+            tsince=self.tsince,  # pyright: ignore[reportArgumentType]
+            # consts=self.consts, # Uncomment if your sgp4_propagate accepts consts
+            **sgp4_args
         )
         
         # Output: (N, 3), (N, 3)
         return pos, vel
+
+# The rest of your pipeline (StationLayer, DopplerPhysicsLayer, BiasLayer) 
+# remains compatible as long as the shapes match.
 
 class StationLayer(nn.Module):
     def __init__(self, stations, timestamps, station_indices) -> None:
@@ -88,7 +115,7 @@ class DopplerPhysicsLayer(nn.Module):
         return doppler_pred
 
 class BiasLayer(nn.Module):
-    def __init__(self, bias_group: 'BiasGroup') -> None:
+    def __init__(self, bias_group: BiasGroup) -> None:
         super().__init__()
         self.bias_group = bias_group
 

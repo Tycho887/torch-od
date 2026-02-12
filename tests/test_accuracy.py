@@ -13,7 +13,7 @@ from diffod.functional.sgp4 import sgp4_propagate
 # ---------------------------------------------------------
 # 0. Helper: Robust Timing Function
 # ---------------------------------------------------------
-def benchmark_func(name, func, *args, n_iters=5, warmup=False, **kwargs):
+def benchmark_func(name, func, *args, n_iters=5, warmup=False, **kwargs) -> tuple[torch.Tensor, np.float64]:
     """Runs a function multiple times and reports average time."""
     
     # Warmup (important for CUDA and compilation)
@@ -40,7 +40,7 @@ def benchmark_func(name, func, *args, n_iters=5, warmup=False, **kwargs):
         t1 = time.time()
         times.append(t1 - t0)
     
-    avg_time = np.mean(times)
+    avg_time = np.mean(times, dtype=np.float64)
     print(f"  -> Average Time: {avg_time:.6f} s")
     return result, avg_time
 
@@ -63,7 +63,7 @@ init_tle = TLE(data=TLE_list)
 # (Assuming TLE object attributes are already tensors, we define wrappers below)
 
 # Generate massive time batch (1 million points)
-tsince = torch.linspace(0, 10000, 1_000_000, dtype=torch.float64, device=device)
+tsince = torch.linspace(0, 10000, 10_000_000, dtype=torch.float64, device=device)
 
 # Define Constants (WGS-84 usually) for Functional Version
 # You might need to adjust these values to match exactly what `dsgp4` uses internally
@@ -84,13 +84,13 @@ consts = GravConsts()
 # ---------------------------------------------------------
 
 # Wrapper A: Reference (Original dsgp4)
-def run_reference():
+def run_reference() -> torch.Tensor:
     # dsgp4.propagate handles initialization internally if initialized=False
     # We move tsince to cpu if dsgp4 doesn't support gpu, or keep it if it does.
     return dsgp4.propagate(tle=init_tle, tsinces=tsince, initialized=False)
 
 # Wrapper B: Functional (Eager)
-def run_functional():
+def run_functional() -> tuple[torch.Tensor, torch.Tensor]:
     # Ensure inputs are on the correct device
     return sgp4_propagate(
         # consts=consts,
@@ -112,7 +112,7 @@ def run_functional():
 # "max-autotune" is best for massive throughput but takes longer to compile.
 compiled_sgp4 = torch.compile(sgp4_propagate, mode="reduce-overhead")
 
-def run_compiled():
+def run_compiled() -> tuple[torch.Tensor, torch.Tensor]:
     return compiled_sgp4(
         # consts=consts,
         tsince=tsince,
