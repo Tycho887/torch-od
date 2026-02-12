@@ -1,5 +1,3 @@
-import copy
-
 import torch
 from dsgp4.sgp4init import sgp4, sgp4init
 from dsgp4.tle import TLE
@@ -14,10 +12,9 @@ def get_tle_epoch_unix(tle: TLE) -> float:
     return (tle_epoch_mjd - 40587.0) * 86400.0
 
 
-def val(key, default, state_def, x):
+def val(key, default, state_def, x) -> torch.Tensor:
     if state_def and key in state_def.map_param_to_idx:
         y = x[state_def.map_param_to_idx[key]]
-        print(y)
         return y
     else:
         return default
@@ -82,7 +79,7 @@ def update(
     return sat_obj
 
 
-def propagate(
+def dsgp4(
     tle: TLE,
     timestamps: torch.Tensor,
     x: torch.Tensor | None = None,
@@ -114,13 +111,15 @@ def propagate(
 
     # 2. TLE Setup (Static vs Differentiable)
     if x is None:
-        sat_obj = tle
+        sat_obj = tle.copy()
     else:
-        sat_obj = update(tle, x, state_def, gravity_constant)
+        sat_obj = update(
+            tle=tle, x=x, state_def=state_def, gravity_constant=gravity_constant
+        )
 
     # 4. Propagation
     # Returns (Batch, Time, 2, 3)
-    state = sgp4(sat_obj, tsince_min)
+    state = sgp4(satellite=sat_obj, tsince=tsince_min)
 
     # 5. Unpack to (N, 3)
     pos = state[:, 0]

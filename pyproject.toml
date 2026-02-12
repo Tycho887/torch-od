@@ -11,6 +11,7 @@ dependencies = [
     "torch (>=2.9.0,<3.0.0)",
     "dsgp4 (>=1.1.5,<2.0.0)",
     "astropy (>=7.2.0,<8.0.0)",
+    "einops (>=0.8.2,<0.9.0)",
 ]
 
 [build-system]
@@ -24,3 +25,8 @@ priority = "explicit"
 
 [tool.poetry.dependencies]
 torch = {source = "torch-cpu"}
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.15.0,<0.16.0)"
+]
