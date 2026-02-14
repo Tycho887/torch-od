@@ -1,86 +1,69 @@
-from dataclasses import dataclass
-
 import numpy as np
 import torch
 from astropy import units as u
-from astropy.coordinates import EarthLocation
+from astropy.coordinates import ITRS, TEME, CartesianDifferential, EarthLocation
+from astropy.time import Time
 
 
-@dataclass
-class GroundStation:
-    name: str
-    lat: float  # Degrees
-    lon: float  # Degrees
-    alt: float  # km
-
-    def __post_init__(self):
-        # Precompute ECEF position (using Astropy for precision)
-        loc = EarthLocation(
-            lat=self.lat * u.deg, lon=self.lon * u.deg, height=self.alt * u.km
-        )
-        # Store as a (3,) float64 tensor
-        self.pos_ecef = torch.tensor(
-            [loc.x.to(u.km).value, loc.y.to(u.km).value, loc.z.to(u.km).value],
-            dtype=torch.float64,
-        )
-
-
-def propagate_stations(
-    stations: list[GroundStation],
-    t_tai: torch.Tensor,
-    station_indices: torch.Tensor,
-    epoch_tai: float = 0.0,
-):
+def station_teme_preprocessor(
+    times_s: np.ndarray,
+    station_ids: np.ndarray,
+    id_to_station: dict[int, np.ndarray],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Batched propagation of multiple ground stations to TEME frame.
-
-    Args:
-        stations: List of GroundStation objects.
-        t_tai: (N,) tensor of timestamps (TAI seconds).
-        station_indices: (N,) integer tensor mapping each timestamp to a station in the list.
-        epoch_tai: Reference epoch for Earth rotation (GMST calculation).
-
-    Returns:
-        pos_teme: (N, 3) Position of the specific station at the specific time.
-        vel_teme: (N, 3) Velocity of the station (due to Earth rotation).
+    Vectorized computation of TEME states for moving or multiple ground platforms.
+    All input arrays must be of the same length (N).
     """
-    # 1. Stack all station ECEF vectors into a single lookup table
-    # Shape: (K_stations, 3)
-    station_lookup = torch.stack([s.pos_ecef for s in stations]).to(t_tai.device)
 
-    # 2. Select the correct initial position for each measurement
-    # Shape: (N, 3)
-    pos_ecef_selected = station_lookup[station_indices]
+    # 1. Map station IDs to coordinates vectorially
+    # np.unique finds the unique strings and returns the integer indices
+    # needed to reconstruct the original station_ids array.
+    unique_stations, inverse_indices = np.unique(station_ids, return_inverse=True)
 
-    # 3. Earth Rotation Physics (SGP4/TEME constants)
-    w_earth = 7.2921151467e-5  # rad/s
+    # Build a dense lookup array for just the unique stations (M x 3)
+    lookup_array = np.array([id_to_station[station] for station in unique_stations])
 
-    # Calculate GMST angle (Theta)
-    # Note: For high precision, you would calculate GMST0 at epoch_tai using astropy
-    # Here we assume t_tai is seconds since the epoch where GMST was 0 (simplified)
-    # In production: theta = gmst0 + w * (t - t_epoch)
-    theta = w_earth * (t_tai - epoch_tai)
+    # Broadcast the lookup array back to the original N length using advanced indexing
+    # This happens instantly at the C-level, yielding an (N x 3) array.
+    coords = lookup_array[inverse_indices]
 
-    c = torch.cos(theta)
-    s = torch.sin(theta)
+    # Extract the individual columns
+    lons_deg = coords[:, 0]
+    lats_deg = coords[:, 1]
+    alts_m = coords[:, 2]
 
-    # 4. Rotation (Vectorized for N measurements)
-    x_ec = pos_ecef_selected[:, 0]
-    y_ec = pos_ecef_selected[:, 1]
-    z_ec = pos_ecef_selected[:, 2]
+    # 2. EarthLocation accepts arrays natively
+    location = EarthLocation.from_geodetic(
+        lon=lons_deg * u.deg, lat=lats_deg * u.deg, height=alts_m * u.m
+    )
 
-    # Position Rotation
-    x_teme = x_ec * c - y_ec * s
-    y_teme = x_ec * s + y_ec * c
-    z_teme = z_ec
+    # 3. Time accepts arrays natively
+    t = Time(times_s, format="unix", scale="utc")
 
-    pos_teme = torch.stack([x_teme, y_teme, z_teme], dim=1)
+    # 4. Get ITRS positions for all N points
+    itrs_pos = location.get_itrs(obstime=t).cartesian
 
-    # Velocity Rotation (Cross Product: w x r)
-    vx_teme = -w_earth * y_teme
-    vy_teme = w_earth * x_teme
-    vz_teme = torch.zeros_like(z_teme)
+    # 5. Create an N-length array of velocity differentials
+    zeros = np.zeros_like(itrs_pos.x.value)
+    itrs_vel = CartesianDifferential(
+        d_x=zeros * (u.km / u.s), d_y=zeros * (u.km / u.s), d_z=zeros * (u.km / u.s)
+    )
 
-    vel_teme = torch.stack([vx_teme, vy_teme, vz_teme], dim=1)
+    # 6. Combine and transform
+    itrs_pos_with_vel = itrs_pos.with_differentials(itrs_vel)
+    itrs_geo = ITRS(itrs_pos_with_vel, obstime=t)
 
-    return pos_teme, vel_teme
+    # Astropy handles the vectorized transformation for all N points at once
+    teme_state = itrs_geo.transform_to(TEME(obstime=t))
+
+    # Returns (N, 3) arrays for position and velocity
+    pos, vel = (
+        teme_state.cartesian.xyz.to(u.km).value.T,
+        teme_state.velocity.d_xyz.to(u.km / u.s).value.T,
+    )
+
+    return torch.tensor(data=pos, dtype=dtype, device=device), torch.tensor(
+        data=vel, dtype=dtype, device=device
+    )

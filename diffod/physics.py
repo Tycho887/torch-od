@@ -1,4 +1,6 @@
 import torch
+from dsgp4.mldsgp4 import mldsgp4
+
 from diffod.utils import BiasGroup
 
 
@@ -37,7 +39,9 @@ def compute_range(sat_pos, st_pos) -> torch.Tensor:
     return torch.norm(input=(sat_pos - st_pos), dim=1)
 
 
-def apply_linear_bias(predictions: torch.Tensor, x_state: torch.Tensor, bias_group: BiasGroup) -> torch.Tensor:
+def apply_linear_bias(
+    predictions: torch.Tensor, x_state: torch.Tensor, bias_group: BiasGroup
+) -> torch.Tensor:
     if bias_group is None:
         return predictions
 
@@ -60,5 +64,5 @@ def apply_linear_bias(predictions: torch.Tensor, x_state: torch.Tensor, bias_gro
     # We clone to avoid in-place modification errors in AD
     corrected = predictions.clone()
     corrected[mask] = corrected[mask] + active_biases
-    
+
     return corrected

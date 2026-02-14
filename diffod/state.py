@@ -1,5 +1,6 @@
 import torch
 from dsgp4.tle import TLE
+
 from diffod.utils import BiasGroup
 
 
@@ -15,7 +16,7 @@ class StateDefinition:
         fit_argp: bool = False,
         fit_ma: bool = False,
         fit_bstar: bool = False,
-        fit_ndot: bool = False, # Added capability to fit drag terms if needed
+        fit_ndot: bool = False,  # Added capability to fit drag terms if needed
         fit_nddot: bool = False,
     ):
         self.init_tle = init_tle
@@ -47,21 +48,25 @@ class StateDefinition:
         # Static mapping from our friendly names to Functional SGP4 arg names
         # and the corresponding TLE attribute for default values.
         self._func_arg_map = {
-            "mean_motion":         ("no_kozai", "_no_kozai"),
-            "eccentricity":        ("ecco",     "_ecco"),
-            "inclination":         ("inclo",    "_inclo"),
-            "raan":                ("nodeo",    "_nodeo"),
-            "argument_of_perigee": ("argpo",    "_argpo"),
-            "mean_anomaly":        ("mo",       "_mo"),
-            "b_star":              ("bstar",    "_bstar"),
-            "ndot":                ("ndot",     "_ndot"),
-            "nddot":               ("nddot",    "_nddot"),
+            "mean_motion": ("no_kozai", "_no_kozai"),
+            "eccentricity": ("ecco", "_ecco"),
+            "inclination": ("inclo", "_inclo"),
+            "raan": ("nodeo", "_nodeo"),
+            "argument_of_perigee": ("argpo", "_argpo"),
+            "mean_anomaly": ("mo", "_mo"),
+            "b_star": ("bstar", "_bstar"),
+            "ndot": ("ndot", "_ndot"),
+            "nddot": ("nddot", "_nddot"),
         }
 
-    def get_initial_state(self) -> torch.Tensor:
-        """Returns the initial x0 tensor populated with TLE values."""
-        x0 = torch.zeros(self.current_dim, dtype=torch.float64, requires_grad=True)
-        
+    def get_initial_state(
+        self, device: torch.device = torch.device("cpu")
+    ) -> torch.Tensor:
+        # Explicitly set the device for the optimization variables
+        x0 = torch.zeros(
+            self.current_dim, dtype=torch.float32, requires_grad=True, device=device
+        )
+
         with torch.no_grad():
             for name, idx in self.map_param_to_idx.items():
                 _, tle_attr = self._func_arg_map[name]
@@ -80,17 +85,16 @@ class StateDefinition:
 
         # Iterate over all possible SGP4 parameters
         for friendly_name, (func_arg_name, tle_attr) in self._func_arg_map.items():
-            
             if friendly_name in self.map_param_to_idx:
                 # 1. Active Parameter: Get from State Vector
                 idx = self.map_param_to_idx[friendly_name]
-                val = x_state[idx] # Keep as scalar tensor to preserve gradients
+                val = x_state[idx]  # Keep as scalar tensor to preserve gradients
             else:
                 # 2. Static Parameter: Get from initial TLE
                 # We convert to tensor here so SGP4 receives uniform inputs
                 float_val = getattr(self.init_tle, tle_attr, 0.0)
                 val = torch.tensor(float_val, device=device, dtype=dtype)
-            
+
             args[func_arg_name] = val
 
         return args
@@ -107,7 +111,7 @@ class StateDefinition:
             name=name,
             indices=group_indices,
             global_offset=self.current_dim,
-            num_params=num_new_params
+            num_params=num_new_params,
         )
         self.bias_groups[name] = group
         self.current_dim += num_new_params
