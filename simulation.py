@@ -2,19 +2,17 @@
 # Assume these modules are imported from the files above
 import torch
 from dsgp4.tle import TLE
+import numpy as np
 from torch.func import jacfwd
 import time
 from diffod.layers import (
     SGP4Layer,
-    StationLayer,
-    DopplerPhysicsLayer,
     BiasLayer,
-    OrbitDeterminationModel,
+    ResidualStack,
 )
-import diffod.gse as gse
 import diffod.state as state
 
-from ground_station import compute_station_state_analytical
+from ground_station import station_teme_preprocessor
 
 # ---------------------------------------------------------
 
@@ -28,16 +26,20 @@ TLE_list = [
 ]
 init_tle = TLE(data=TLE_list)
 # Create Stations
-stations = [
-    gse.GroundStation(name="Tromso", lat=69.6, lon=18.9, alt=0.1),
-    gse.GroundStation(name="Svalbard", lat=78.2, lon=15.4, alt=0.4),
-]
+stations = {
+    0: np.array(object=[69.6, 18.9, 0.1]),
+    1: np.array(object=[78.2, 15.4, 0.4]),
+}
 
 # Mock Data (N=1000 measurements)
 # Timestamps (seconds from epoch)
 t_obs = torch.linspace(0, 6000, 10000, dtype=torch.float32)
 # Station ID for each measurement (0=Tromso, 1=Svalbard)
+
+# Define string tensor
+
 st_indices = torch.zeros(10000, dtype=torch.int32)
+
 st_indices[5009:] = 1
 # Pass ID for biases (0=Pass1, 1=Pass2)
 pass_indices = torch.zeros(10000, dtype=torch.int32)
@@ -47,8 +49,10 @@ pass_indices[4000:] = 3
 
 t0 = time.time()
 
-station_pos, station_vel = compute_station_state_analytical(
-    times_s=t_obs.numpy(), lat_deg=stations[0].lat, lon_deg=stations[0].lon, alt_m=stations[0].alt
+station_pos, station_vel = station_teme_preprocessor(
+    times_s=t_obs.numpy(),
+    station_ids=st_indices.numpy(),
+    id_to_station=stations,
 )
 
 t1 = time.time()
@@ -64,7 +68,7 @@ state_def = state.StateDefinition(
     fit_ma=True,
     fit_mean_motion=True,
     fit_argp=True,
-    fit_bstar=False,
+    fit_bstar=True,
     fit_eccentricity=False,
     fit_inclination=False,
     fit_raan=False,
@@ -76,16 +80,14 @@ state_def.add_linear_bias(name="doppler_bias", group_indices=pass_indices)
 
 # 1. Assemble Layers
 layer_sgp4 = SGP4Layer(timestamps=t_obs, state_def=state_def)
-layer_stat = StationLayer(stations=stations, timestamps=t_obs, station_indices=st_indices)
-layer_phys = DopplerPhysicsLayer(center_freq=2.2e9)
+# layer_stat = StationLayer(stations=stations, timestamps=t_obs, station_indices=st_indices)
+# layer_phys = DopplerPhysicsLayer(center_freq=2.2e9)
 layer_bias = BiasLayer(bias_group=state_def.get_bias_group(name="doppler_bias"))
 
 # 2. Compile Model
-model = OrbitDeterminationModel(
-    sgp4_layer=layer_sgp4, 
-    station_layer=layer_stat, 
-    physics_layer=layer_phys, 
-    bias_layer=layer_bias
+model = ResidualStack(
+    state_def=state_def,
+    bias_group=state_def.get_bias_group(name="doppler_bias")
 )
 
 compiled_model = torch.compile(model=model, mode="max-autotune")
@@ -97,7 +99,7 @@ x0 = state_def.get_initial_state()
 # Define the function for Jacobian
 # jacfwd expects f(x) -> y
 def functional_forward(x) -> torch.Tensor:
-    return compiled_model(x)
+    return compiled_model(x=x, tsince=t_obs, st_pos=station_pos, st_vel=station_vel, center_freq=2.2e9)
 
 t_total = 0
 
@@ -110,11 +112,9 @@ for i in range(100):
     # This traces the entire graph: Bias -> Physics -> Geometry -> SGP4 -> Constants -> x
     H = jacfwd(func=functional_forward)(x0)
 
-    det = torch.linalg.det(torch.matmul(input=H.T, other=H))
-
     t1 = time.time()
 
-    print(f"Time taken: {t1 - t0:.4f} seconds. determinant: {det:.4f}")
+    print(f"Time taken: {t1 - t0:.4f} seconds")
 
     t_total += t1 - t0
 
