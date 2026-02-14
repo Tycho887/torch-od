@@ -14,6 +14,8 @@ from diffod.layers import (
 import diffod.gse as gse
 import diffod.state as state
 
+from ground_station import compute_station_state_analytical
+
 # ---------------------------------------------------------
 
 # 1. Setup Data
@@ -33,15 +35,25 @@ stations = [
 
 # Mock Data (N=1000 measurements)
 # Timestamps (seconds from epoch)
-t_obs = torch.linspace(0, 6000, 100000)
+t_obs = torch.linspace(0, 6000, 10000, dtype=torch.float32)
 # Station ID for each measurement (0=Tromso, 1=Svalbard)
-st_indices = torch.zeros(100000, dtype=torch.int32)
-st_indices[5000:] = 1
+st_indices = torch.zeros(10000, dtype=torch.int32)
+st_indices[5009:] = 1
 # Pass ID for biases (0=Pass1, 1=Pass2)
-pass_indices = torch.zeros(100000, dtype=torch.int32)
-pass_indices[20000:] = 1
-pass_indices[50000:] = 2
-pass_indices[40000:] = 3
+pass_indices = torch.zeros(10000, dtype=torch.int32)
+pass_indices[2000:] = 1
+pass_indices[5000:] = 2
+pass_indices[4000:] = 3
+
+t0 = time.time()
+
+station_pos, station_vel = compute_station_state_analytical(
+    times_s=t_obs.numpy(), lat_deg=stations[0].lat, lon_deg=stations[0].lon, alt_m=stations[0].alt
+)
+
+t1 = time.time()
+
+print(f"Time taken: {t1 - t0:.4f} seconds")
 
 # 2. Define State Vector
 # ---------------------------------------------------------
@@ -76,6 +88,8 @@ model = OrbitDeterminationModel(
     bias_layer=layer_bias
 )
 
+compiled_model = torch.compile(model=model, mode="max-autotune")
+
 # 3. Functional Jacobian Calculation
 # x0 is your flat tensor of params
 x0 = state_def.get_initial_state()
@@ -83,17 +97,30 @@ x0 = state_def.get_initial_state()
 # Define the function for Jacobian
 # jacfwd expects f(x) -> y
 def functional_forward(x) -> torch.Tensor:
-    return model(x)
-t0 = time.time()
-# Compute Jacobian (N_obs, N_params)
-# This traces the entire graph: Bias -> Physics -> Geometry -> SGP4 -> Constants -> x
-H = jacfwd(functional_forward)(x0)
+    return compiled_model(x)
 
-t1 = time.time()
+t_total = 0
+
+for i in range(100):
+
+    print(f"--- Iteration {i} ---")
+
+    t0 = time.time()
+    # Compute Jacobian (N_obs, N_params)
+    # This traces the entire graph: Bias -> Physics -> Geometry -> SGP4 -> Constants -> x
+    H = jacfwd(func=functional_forward)(x0)
+
+    det = torch.linalg.det(torch.matmul(input=H.T, other=H))
+
+    t1 = time.time()
+
+    print(f"Time taken: {t1 - t0:.4f} seconds. determinant: {det:.4f}")
+
+    t_total += t1 - t0
 
 print(f"Jacobian H shape: {H.shape}") 
 # e.g. (1000, 8) -> 1000 measurements, 6 orbital + 2 bias params
 
 print(H[:, :5])
 
-print(f"Time taken: {t1 - t0:.4f}")
+print(f"Average time taken: {t_total/100:.4f}")
