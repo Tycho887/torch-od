@@ -1,3 +1,4 @@
+import re
 import time
 
 import numpy as np
@@ -8,7 +9,7 @@ from torch.func import jacfwd
 import diffod.state as state
 from diffod.functional.models import DopplerResiduals
 from diffod.gse import station_teme_preprocessor
-from diffod.solvers.cca import compute_cca_step
+from diffod.solvers.cca import cca_solve_single
 
 # ---------------------------------------------------------
 # 1. Setup Data & GPU Boundary
@@ -94,80 +95,55 @@ N_solves = 10
 x_init_batch = x_true.unsqueeze(0).repeat(N_solves, 1)
 x_init_batch = x_init_batch + x_init_batch * torch.randn_like(x_init_batch) * 1e-4
 
+# ---------------------------------------------------------
+# 4. CCA Matrix Configurations
+# ---------------------------------------------------------
+sigma_obs = 10.0  # 10Hz noise standard deviation
+n_total = x_true.shape[0]
 
-# ---------------------------------------------------------
-# 4. Define the Native GPU Solver with LU & VMAP
-# ---------------------------------------------------------
-scale_x = torch.tensor(
-    [1e2, 1e3, 1.0, 0.3, 0.25, 1e4, 1.0, 1.0, 1.0, 1.0, 1.0],
-    dtype=torch.float64,
+# Define which parameters are estimated (True) vs considered (False)
+# Example: Let's consider the last two parameters (e.g., drag or specific biases)
+consider_map = torch.tensor(
+    [True, True, True, True, False, False, False, True, True, True, True],
+    dtype=torch.bool,
     device=target_device,
 )
-# scale_x_inv = 1.0 / scale_x
 
-# Define the observation scale (N_obs,)
-# Typically 1.0 / observation_noise_std
-# For 10Hz noise:
-scale_y = torch.full((N_samples,), 0.1, dtype=torch.float64, device=target_device)
+n_est = consider_map.sum().item()
+n_cons = n_total - n_est
 
-
-def single_gn_step_scaled(x_single_fp64, y_obs_fixed):
-    """Executes a single, well-conditioned GN step mapped over a batch of states."""
-    x_fp32 = x_single_fp64.to(torch.float32)
-
-    # 1. Forward Pass & Jacobian (FP32)
-    y_pred_fp32 = functional_forward(x_fp32)
-    H_fp32 = jacfwd(func=functional_forward)(x_fp32)
-
-    # 2. Cast to FP64
-    H_fp64 = H_fp32.to(torch.float64)
-    dy_fp64 = (y_obs_fixed - y_pred_fp32).to(torch.float64)
-
-    # 3. Apply Scaling Transformations using Broadcasting
-    # scale_x.unsqueeze(0) broadcasts across columns (parameters)
-    # scale_y.unsqueeze(1) broadcasts across rows (observations)
-    H_scaled = H_fp64 * scale_x.unsqueeze(0) * scale_y.unsqueeze(1)
-    dy_scaled = dy_fp64 * scale_y
-
-    # 4. Form Well-Conditioned Normal Equations
-    H_T = H_scaled.T
-    A_scaled = H_T @ H_scaled
-    b_scaled = H_T @ dy_scaled
-
-    # 5. Levenberg-Marquardt Damping (Now much more effective in scaled space)
-    damping = (
-        torch.eye(A_scaled.shape[0], dtype=torch.float64, device=target_device) * 1e-6
-    )
-    A_damped = A_scaled + damping
-
-    # 6. Solve for the scaled update (du)
-    du = torch.linalg.solve(A_damped, b_scaled)
-
-    # 7. Rescale update back to physical units (dx)
-    dx = du * scale_x
-
-    return x_single_fp64 + dx
-
-
-# Re-vectorize the solver
-batched_gn_step = torch.vmap(single_gn_step_scaled, in_dims=(0, None))
-
-
-def run_solver_loop(x_batch, y_obs_fixed, num_steps=5):
-    """Executes the full batched iterative solver loop."""
-    x = x_batch
-    for _ in range(num_steps):
-        x = batched_gn_step(x, y_obs_fixed)
-    return x
+# Define Priors
+# P_cc: Uncertainty of the parameters we are NOT solving for
+P_cc = torch.eye(n_cons, dtype=torch.float64, device=target_device) * 1e-4
+# P_x_inv: Information matrix (inverse covariance) anchoring the estimated state
+P_x_inv = torch.eye(n_est, dtype=torch.float64, device=target_device) * 1e-6
 
 
 # ---------------------------------------------------------
-# 5. Compile the Solver Loop (Replaces Manual CUDA Graphs)
+# 5. Define VMAP Solver
 # ---------------------------------------------------------
+def residual_fn(state):
+    return functional_forward(state)
+
+
+# Vmap the single solver across the batch dimension (dim=0) for states,
+# while keeping priors and observations broadcasted/fixed (None)
+batched_cca_solve = torch.vmap(
+    lambda x, y: cca_solve_single(
+        x_init=x,
+        y_obs_fixed=y,
+        residual_fn=residual_fn,
+        sigma_obs=sigma_obs,
+        consider_map=consider_map,
+        P_cc=P_cc,
+        P_x_inv=P_x_inv,
+        num_steps=5,
+    ),
+    in_dims=(0, None),
+)
+
 print("Compiling solver to CUDA Graphs (this takes a moment)...")
-# 'reduce-overhead' tells PyTorch to automatically use CUDA graphs internally,
-# intelligently handling the cuSOLVER workspace allocations that break manual graphs.
-fast_solver = torch.compile(run_solver_loop, mode="reduce-overhead")
+fast_solver = torch.compile(batched_cca_solve, mode="reduce-overhead")
 
 # Warmup run to trigger compilation
 _ = fast_solver(x_init_batch, y_obs)
@@ -175,22 +151,24 @@ _ = fast_solver(x_init_batch, y_obs)
 # ---------------------------------------------------------
 # 6. Execute Iterations & Benchmark
 # ---------------------------------------------------------
-print("Executing fast batched solve...")
-
-# Synchronize before starting the timer to ensure accurate measurement
+print("Executing fast batched CCA solve...")
 torch.cuda.synchronize()
 t0 = time.time()
 
-# This single line executes 100 independent GN solvers (5 steps each)
-final_x_batch = fast_solver(x_init_batch, y_obs)
+# Returns the batched states and batched Consider Covariances
+final_x_batch, final_P_batch = fast_solver(x_init_batch, y_obs)
 
 torch.cuda.synchronize()
 t1 = time.time()
 
 print(f"Time taken for {N_solves} simultaneous solves: {(t1 - t0) * 1000:.2f} ms")
 
-# Validate convergence by comparing the first solve to ground truth
 print("\nConvergence Check (First Solve vs Ground Truth):")
 print(f"Ground Truth: {x_true[:7].detach().cpu().numpy()}")
 print(f"Final Output: {final_x_batch[0, :7].detach().cpu().numpy()}")
 print(f"Mean Output:  {final_x_batch.mean(dim=0)[:7].detach().cpu().numpy()}")
+print(f"Final Consider Covariance: {final_P_batch[0, :7, :7].detach().cpu().numpy()}")
+
+print(
+    f"Final Consider Covariance Trace: {torch.trace(final_P_batch[0, :7, :7]).detach().cpu().numpy()}"
+)
