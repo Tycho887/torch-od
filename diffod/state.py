@@ -92,8 +92,8 @@ class StateDefinition:
             else:
                 # 2. Static Parameter: Get from initial TLE
                 # We convert to tensor here so SGP4 receives uniform inputs
-                float_val = getattr(self.init_tle, tle_attr, 0.0)
-                val = torch.tensor(float_val, device=device, dtype=dtype)
+                val = getattr(self.init_tle, tle_attr, 0.0)
+                # val = torch.tensor(float_val.detach()., device=device, dtype=dtype)
 
             args[func_arg_name] = val
 
@@ -121,3 +121,34 @@ class StateDefinition:
             return self.bias_groups[name]
         else:
             raise ValueError(f"Bias group '{name}' not found.")
+
+    def get_estimate_map(
+        self, consider_params: list[str], device: torch.device = torch.device("cpu")
+    ) -> torch.Tensor:
+        """
+        Generates a boolean selection vector for Consider Covariance Analysis.
+        True  -> Parameter is Estimated
+        False -> Parameter is Considered (uncertainty accounted for, but state not updated)
+        """
+        # Initialize all active parameters as Estimated (True)
+        consider_map = torch.ones(self.current_dim, dtype=torch.bool, device=device)
+
+        for name in consider_params:
+            if name in self.map_param_to_idx:
+                idx = self.map_param_to_idx[name]
+                consider_map[idx] = False
+
+            elif name in self.bias_groups:
+                # Handle dynamically sized bias blocks
+                bg = self.bias_groups[name]
+                start = bg.global_offset
+                end = start + bg.num_params
+                consider_map[start:end] = False
+
+            else:
+                raise ValueError(
+                    f"'{name}' is not an active parameter or bias group in the state vector. "
+                    "Ensure it was initialized with fit_=True or add_linear_bias()."
+                )
+
+        return ~consider_map

@@ -49,7 +49,7 @@ station_pos_cpu, station_vel_cpu = station_teme_preprocessor(
     device=torch.device("cpu"),
 )
 
-# Cross the boundary: Move to GPU & enforce FP32
+# Cross the boundary: Move to GPU & enforce FP64
 st_pos = station_pos_cpu.to(device=target_device)
 st_vel = station_vel_cpu.to(device=target_device)
 t_obs_gpu = t_obs_cpu.to(device=target_device)
@@ -103,13 +103,14 @@ n_total = x_true.shape[0]
 
 # Define which parameters are estimated (True) vs considered (False)
 # Example: Let's consider the last two parameters (e.g., drag or specific biases)
-consider_map = torch.tensor(
-    [True, True, True, True, False, False, False, True, True, True, True],
-    dtype=torch.bool,
-    device=target_device,
+
+consider_params = ["b_star", "eccentricity"]
+
+estimate_map = state_def.get_estimate_map(
+    consider_params=consider_params, device=target_device
 )
 
-n_est = consider_map.sum().item()
+n_est = int(estimate_map.sum().item())
 n_cons = n_total - n_est
 
 # Define Priors
@@ -122,9 +123,6 @@ P_x_inv = torch.eye(n_est, dtype=torch.float64, device=target_device) * 1e-6
 # ---------------------------------------------------------
 # 5. Define VMAP Solver
 # ---------------------------------------------------------
-def residual_fn(state):
-    return functional_forward(state)
-
 
 # Vmap the single solver across the batch dimension (dim=0) for states,
 # while keeping priors and observations broadcasted/fixed (None)
@@ -132,12 +130,13 @@ batched_cca_solve = torch.vmap(
     lambda x, y: cca_solve_single(
         x_init=x,
         y_obs_fixed=y,
-        residual_fn=residual_fn,
+        forward_fn=functional_forward,
         sigma_obs=sigma_obs,
-        consider_map=consider_map,
+        estimate_mask=estimate_map,
         P_cc=P_cc,
         P_x_inv=P_x_inv,
         num_steps=5,
+        n_estimated=n_est,
     ),
     in_dims=(0, None),
 )
