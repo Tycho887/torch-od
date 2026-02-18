@@ -1,3 +1,4 @@
+from doctest import DocTestParser
 import re
 import time
 
@@ -7,7 +8,7 @@ from dsgp4.tle import TLE
 from torch.func import jacfwd
 
 import diffod.state as state
-from diffod.functional.models import DopplerResiduals
+from diffod.functional.system import PredictDoppler
 from diffod.gse import station_teme_preprocessor
 from diffod.solvers.cca import cca_solve_single
 
@@ -70,7 +71,7 @@ state_def = state.StateDefinition(
 )
 state_def.add_linear_bias(name="doppler_bias", group_indices=pass_indices)
 
-model = DopplerResiduals(
+model = PredictDoppler(
     state_def=state_def, bias_group=state_def.get_bias_group(name="doppler_bias")
 )
 
