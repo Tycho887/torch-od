@@ -16,6 +16,7 @@ class PredictDoppler(nn.Module):
         self,
         state_def,
         bias_group=None,
+        use_pretrained_model: bool = False,
         surrogate_weights_path: str = "models/mldsgp4_example_model.pth",
     ) -> None:
         super().__init__()
@@ -24,10 +25,10 @@ class PredictDoppler(nn.Module):
         self.bias_group = bias_group
 
         # Surrogate model initialization
-        self.use_pretrained_model = surrogate_weights_path is not None
+        self.use_pretrained_model = use_pretrained_model
         if self.use_pretrained_model:
             self.surrogate_model = FunctionalMLdSGP4()
-            self.surrogate_model.load_state_dict(torch.load(surrogate_weights_path))
+            self.surrogate_model.load_state_dict(state_dict=torch.load(surrogate_weights_path))
             self.surrogate_model.eval()  # Ensure deterministic behavior for inference
             self.surrogate_model.requires_grad_(
                 False
@@ -54,7 +55,7 @@ class PredictDoppler(nn.Module):
         if self.use_pretrained_model:
             # The surrogate model requires the standard propagator to wrap around
             sat_pos, sat_vel = self.model(
-                tsince=tsince, sgp4_propagate=sgp4_propagate, **sgp4_args
+                tsince=tsince, **sgp4_args
             )
         else:
             # The standard analytical propagator runs natively

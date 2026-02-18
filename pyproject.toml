@@ -14,6 +14,7 @@ dependencies = [
     "einops",
     "pytest",
     "requests",
+    "polars (>=1.38.1,<2.0.0)",
 ]
 
 [build-system]
