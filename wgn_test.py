@@ -66,9 +66,9 @@ state_def = state.StateDefinition(
     fit_ma=True,
     fit_mean_motion=True,
     fit_argp=False,
-    fit_bstar=True,
+    fit_bstar=False,
     fit_inclination=False,
-    fit_eccentricity=True,
+    fit_eccentricity=False,
     fit_raan=False,
 )
 state_def.add_linear_bias(name="doppler_bias", group_indices=contacts)
@@ -95,13 +95,9 @@ x_init_batch = x_init_batch + x_init_batch * torch.randn_like(x_init_batch) * 1e
 sigma_obs = 10.0  
 n_total = x_true.shape[0]
 
-# Even in WGN, we can freeze parameters we don't want to estimate
-frozen_params = []#"b_star", "eccentricity"]
-estimate_map = state_def.get_estimate_map(
-    consider_params=frozen_params, device=target_device
-)
-
-n_est = int(estimate_map.sum().item())
+active_map = state_def.get_active_map(device=target_device)
+# estimate_map = active_map
+print(active_map)
 
 # Only the prior information matrix is needed for standard WGN
 P_x_inv = torch.eye(n=2, dtype=torch.float64, device=target_device) #* 1e-6
@@ -123,17 +119,16 @@ for i in range(N_solves):
         y_obs_fixed=doppler_obs,
         forward_fn=functional_forward,
         sigma_obs=sigma_obs,
-        estimate_mask=estimate_map,  # This tells the solver which columns of J to use
+        estimate_mask=active_map,  # This tells the solver which columns of J to use
         num_steps=5,
         # The following are passed but ignored by the new simplified solver
         P_x_inv=P_x_inv,
-        n_estimated=n_est,
     )
     final_x_list.append(x_out)
     final_P_list.append(P_out)
 
-final_x_batch = torch.stack(final_x_list)
-final_P_batch = torch.stack(final_P_list)
+final_x_batch = torch.stack(tensors=final_x_list)
+final_P_batch = torch.stack(tensors=final_P_list)
 
 t1 = time.time()
 

@@ -6,7 +6,7 @@ def solve_gn_step(
     J: torch.Tensor, 
     y_model: torch.Tensor, 
     y_obs: torch.Tensor, 
-    sqrt_w: float
+    sqrt_w: float = 1.0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Standard Gauss-Newton step using Normal Equations with column normalization.
@@ -25,6 +25,8 @@ def solve_gn_step(
     # Form Normal Equations: (Jn^T @ Jn) @ dx_tilde = Jn^T @ rw
     Hn = Jn.T @ Jn
     bn = Jn.T @ rw
+
+    print(f"cond: {torch.linalg.cond(Hn)}")
     
     # Solve for update
     dx_tilde = torch.linalg.solve(Hn, bn)
@@ -49,11 +51,10 @@ def wgn_solve_single(
     Iterative solver using the simplified Normal Equations approach.
     """
     x = x_init.detach().clone().to(torch.float64)
-    sqrt_w = 1.0 / sigma_obs
+    sqrt_w = 1.0 #/ sigma_obs
     
     # Initialize a dummy covariance for the full state size
     n_total = x.shape[0]
-    n_est = int(estimate_mask.sum().item())
     final_P = torch.zeros((n_total, n_total), dtype=torch.float64, device=x.device)
 
     for _ in range(num_steps):
@@ -71,6 +72,9 @@ def wgn_solve_single(
         # 4. Apply update to the masked indices
         x[estimate_mask] = x[estimate_mask] + dx
         
+        print(torch.linalg.norm(dx), len(dx))
+        print(x)
+
         # Keep track of the last covariance for the estimated block
         final_P = P_cov 
 

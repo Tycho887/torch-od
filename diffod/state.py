@@ -1,7 +1,7 @@
 import torch
 from dsgp4.tle import TLE
-
-from diffod.utils import BiasGroup
+# Assuming BiasGroup is available in diffod.utils
+from diffod.utils import BiasGroup 
 
 
 class StateDefinition:
@@ -16,16 +16,17 @@ class StateDefinition:
         fit_argp: bool = False,
         fit_ma: bool = False,
         fit_bstar: bool = False,
-        fit_ndot: bool = False,  # Added capability to fit drag terms if needed
+        fit_ndot: bool = False,
         fit_nddot: bool = False,
     ):
         self.init_tle = init_tle
         self.num_measurements = num_measurements
-        self.map_param_to_idx = {}
-        self.current_dim = 0
+        
+        # The core state vector is permanently fixed to 9 elements.
+        self.core_dim = 9
+        self.current_dim = self.core_dim
 
         # Mapping: (Internal Name) -> (Should Fit?)
-        # Order determines position in State Vector X
         orbital_flags = [
             ("mean_motion", fit_mean_motion),
             ("eccentricity", fit_eccentricity),
@@ -38,15 +39,13 @@ class StateDefinition:
             ("nddot", fit_nddot),
         ]
 
-        for name, should_fit in orbital_flags:
-            if should_fit:
-                self.map_param_to_idx[name] = self.current_dim
-                self.current_dim += 1
+        # All 9 parameters are always present in the state vector at fixed indices
+        self.map_param_to_idx = {name: idx for idx, (name, _) in enumerate(orbital_flags)}
+        self.active_flags = {name: should_fit for name, should_fit in orbital_flags}
 
         self.bias_groups: dict[str, BiasGroup] = {}
 
         # Static mapping from our friendly names to Functional SGP4 arg names
-        # and the corresponding TLE attribute for default values.
         self._func_arg_map = {
             "mean_motion": ("no_kozai", "_no_kozai"),
             "eccentricity": ("ecco", "_ecco"),
@@ -59,10 +58,7 @@ class StateDefinition:
             "nddot": ("nddot", "_nddot"),
         }
 
-    def get_initial_state(
-        self, device: torch.device = torch.device("cpu")
-    ) -> torch.Tensor:
-        # Explicitly set the device for the optimization variables
+    def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
         x0 = torch.zeros(
             self.current_dim, dtype=torch.float32, requires_grad=True, device=device
         )
@@ -70,33 +66,21 @@ class StateDefinition:
         with torch.no_grad():
             for name, idx in self.map_param_to_idx.items():
                 _, tle_attr = self._func_arg_map[name]
-                val = getattr(self.init_tle, tle_attr, 0.0)
-                x0[idx] = val
+                x0[idx] = getattr(self.init_tle, tle_attr, 0.0)
+                
         return x0
 
     def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:
         """
-        Extracts SGP4 parameters from x_state (active) or init_tle (static).
-        Returns a dict suited for `sgp4_propagate(**kwargs)`.
+        Extracts all 9 SGP4 parameters directly from x_state.
+        Because x_state always contains the full core state, we bypass the TLE fallback.
         """
         args = {}
-        device = x_state.device
-        dtype = x_state.dtype
-
-        # Iterate over all possible SGP4 parameters
-        for friendly_name, (func_arg_name, tle_attr) in self._func_arg_map.items():
-            if friendly_name in self.map_param_to_idx:
-                # 1. Active Parameter: Get from State Vector
-                idx = self.map_param_to_idx[friendly_name]
-                val = x_state[idx]  # Keep as scalar tensor to preserve gradients
-            else:
-                # 2. Static Parameter: Get from initial TLE
-                # We convert to tensor here so SGP4 receives uniform inputs
-                val = getattr(self.init_tle, tle_attr, 0.0)
-                # val = torch.tensor(float_val.detach()., device=device, dtype=dtype)
-
-            args[func_arg_name] = val
-
+        for friendly_name, (func_arg_name, _) in self._func_arg_map.items():
+            idx = self.map_param_to_idx[friendly_name]
+            # Slicing keeps it as a scalar tensor to preserve gradients
+            args[func_arg_name] = x_state[idx] 
+            
         return args
 
     def add_linear_bias(self, name: str, group_indices: torch.Tensor):
@@ -119,36 +103,31 @@ class StateDefinition:
     def get_bias_group(self, name: str) -> BiasGroup:
         if name in self.bias_groups:
             return self.bias_groups[name]
-        else:
-            raise ValueError(f"Bias group '{name}' not found.")
+        raise ValueError(f"Bias group '{name}' not found.")
 
-    def get_estimate_map(
-        self, consider_params: list[str], device: torch.device = torch.device("cpu")
-    ) -> torch.Tensor:
+    def get_active_map(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
         """
-        Generates a boolean selection vector for Consider Covariance Analysis.
-        True  -> Parameter is Estimated
-        False -> Parameter is Considered (uncertainty accounted for, but state not updated)
+        Generates a boolean selection vector for Normal Equation solving.
+        True -> Parameter is Active (columns to select from the Jacobian).
         """
-        # Initialize all active parameters as Estimated (True)
-        consider_map = torch.ones(self.current_dim, dtype=torch.bool, device=device)
+        active_map = torch.zeros(self.current_dim, dtype=torch.bool, device=device)
+        
+        # 1. Flag core orbital parameters based on initialization arguments
+        for name, idx in self.map_param_to_idx.items():
+            active_map[idx] = self.active_flags[name]
+            
+        # 2. Bias parameters are dynamically added and assumed active
+        for bg in self.bias_groups.values():
+            start = bg.global_offset
+            end = start + bg.num_params
+            active_map[start:end] = True
+            
+        return active_map
 
-        for name in consider_params:
-            if name in self.map_param_to_idx:
-                idx = self.map_param_to_idx[name]
-                consider_map[idx] = False
-
-            elif name in self.bias_groups:
-                # Handle dynamically sized bias blocks
-                bg = self.bias_groups[name]
-                start = bg.global_offset
-                end = start + bg.num_params
-                consider_map[start:end] = False
-
-            else:
-                raise ValueError(
-                    f"'{name}' is not an active parameter or bias group in the state vector. "
-                    "Ensure it was initialized with fit_=True or add_linear_bias()."
-                )
-
-        return ~consider_map
+    def get_estimate_map(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+        """
+        Returns the logical inverse of the active map for Consider Covariance Analysis.
+        True -> Parameter is Considered (uncertainty accounted for, but state fixed).
+        False -> Parameter is Estimated.
+        """
+        return ~self.get_active_map(device=device)
