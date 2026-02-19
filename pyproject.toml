@@ -15,6 +15,7 @@ dependencies = [
     "pytest",
     "requests",
     "polars (>=1.38.1,<2.0.0)",
+    "pandas (>=3.0.1,<4.0.0)",
 ]
 
 [build-system]

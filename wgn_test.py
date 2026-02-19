@@ -1,11 +1,13 @@
 from doctest import DocTestParser
 import re
+from string import whitespace
 import time
-
+import dsgp4
 import numpy as np
 import torch
 import polars as pl
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from dsgp4.tle import TLE
 from torch.utils.show_pickle import FakeClass
@@ -39,6 +41,9 @@ target_device = torch.device("cpu")
 # Load real telemetry data
 period_telemetry = pl.read_parquet(source="data/period_telemetry.parquet")
 gps_data = pl.read_csv(source="data/gps_data.csv")
+gps_data_pd = pd.read_fwf(gps_data_path)
+    gps_data = pl.from_pandas(gps_data_pd)
+
 print(gps_data.columns)
 """
 Sat.UTCGregorian          
@@ -244,7 +249,7 @@ def compute_ric_residuals(
     # 1. Extract GPS Ground Truth 
     # (Assuming UTCGregorian is already parsed or you have Unix times aligned)
     # If not, you can parse it via polars: gps_data.with_columns(pl.col("Sat.UTCGregorian").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S.%f"))
-    gps_unix = torch.tensor(gps_data["timestamp_unix"].to_numpy(), dtype=torch.float64, device=device)
+    gps_unix = torch.tensor(gps_data.select(["Sat.UTCGregorian"]).to_numpy(), dtype=torch.float64, device=device)
     
     r_gps = torch.tensor(
         gps_data.select(["Sat.TEME_Earth.X", "Sat.TEME_Earth.Y", "Sat.TEME_Earth.Z"]).to_numpy(),
@@ -260,8 +265,14 @@ def compute_ric_residuals(
     
     # NOTE: Replace this with your specific DSGP4 propagation call
     # It should return r_calc and v_calc of shape (N, 3) in TEME
-    r_calc = torch.zeros_like(r_gps) # Placeholder
-    v_calc = torch.zeros_like(v_gps) # Placeholder
+
+    r_tot = dsgp4.propagate(tle, t_since_mins, initialized=False)
+
+    r_calc = r_tot[:, 0]
+    v_calc = r_tot[:, 1]
+
+    # r_calc = torch.zeros_like(r_gps) # Placeholder
+    # v_calc = torch.zeros_like(v_gps) # Placeholder
     # r_calc, v_calc = sgp4_propagate(tle, t_since_mins) 
 
     # 3. Calculate Cartesian Errors
@@ -294,6 +305,15 @@ def compute_ric_residuals(
     vel_ric = torch.cat([vel_res_R, vel_res_A, vel_res_C], dim=1)
 
     return t_since_mins, pos_ric, vel_ric
+
+
+t_since_mins, pos_ric, vel_ric = compute_ric_residuals(
+    tle=tle,
+    gps_data=gps_data,
+    tle_epoch_unix=epoch,
+    device=target_device,
+)
+
 
 def plot_ric_residuals(
     t_mins: torch.Tensor, 
