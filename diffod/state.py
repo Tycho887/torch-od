@@ -1,6 +1,7 @@
 import torch
 from dsgp4.tle import TLE
 # Assuming BiasGroup is available in diffod.utils
+from diffod.functional.tle import dsgp4
 from diffod.utils import BiasGroup 
 
 
@@ -131,3 +132,13 @@ class StateDefinition:
         False -> Parameter is Estimated.
         """
         return ~self.get_active_map(device=device)
+    
+    def export(self, x) -> dsgp4.TLE:
+        """
+        Exports a TLE object with the given state vector.
+        
+        :param x: State vector
+        :return: dsgp4 TLE object
+        :rtype: dsgp4.TLE
+        """
+        

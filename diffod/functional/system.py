@@ -1,11 +1,10 @@
+from astropy.units import ds
 import torch
 import torch.nn as nn
-
 from diffod.functional.mlsgp4 import FunctionalMLdSGP4
 from diffod.functional.sgp4 import sgp4_propagate
 from diffod.physics import apply_linear_bias, compute_doppler
-
-
+from diffod.functional.tle import update
 class PredictDoppler(nn.Module):
     """
     A strictly stateless pipeline for inference.

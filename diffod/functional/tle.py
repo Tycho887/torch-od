@@ -13,30 +13,30 @@ def get_tle_epoch_unix(tle: TLE) -> float:
     return (tle_epoch_mjd - 40587.0) * 86400.0
 
 
-def val(key, default, state_def, x) -> torch.Tensor:
-    if state_def and key in state_def.map_param_to_idx:
-        y = x[state_def.map_param_to_idx[key]]
+def val(key, default, map_param_to_idx, x) -> torch.Tensor:
+    if key in map_param_to_idx:
+        y = x[map_param_to_idx[key]]
         return y
     else:
         return default
 
 
 def update(
-    tle: TLE, x: torch.Tensor, state_def, gravity_constant: str = "wgs-84"
+    tle: TLE, x: torch.Tensor, map_param_to_idx, gravity_constant: str = "wgs-84"
 ) -> TLE:
     arguments = {
         # --- Dynamic Parameters (Potentially Tensors) ---
         "mean_motion": float(
-            val("mean_motion", tle._no_kozai, state_def, x).detach() / 60
+            val(key="mean_motion", default=tle._no_kozai, map_param_to_idx=map_param_to_idx, x=x).detach() / 60
         ),
-        "eccentricity": float(val("eccentricity", tle._ecco, state_def, x).detach()),
-        "inclination": float(val("inclination", tle._inclo, state_def, x).detach()),
-        "raan": float(val("raan", tle._nodeo, state_def, x).detach()),
+        "eccentricity": float(val(key="eccentricity", default=tle._ecco, map_param_to_idx=map_param_to_idx, x=x).detach()),
+        "inclination": float(val(key="inclination", default=tle._inclo, map_param_to_idx=map_param_to_idx, x=x).detach()),
+        "raan": float(val(key="raan", default=tle._nodeo, map_param_to_idx=map_param_to_idx, x=x).detach()),
         "argument_of_perigee": float(
-            val("argument_of_perigee", tle._argpo, state_def, x).detach()
+            val(key="argument_of_perigee", default=tle._argpo, map_param_to_idx=map_param_to_idx, x=x).detach()
         ),
-        "mean_anomaly": float(val("mean_anomaly", tle._mo, state_def, x).detach()),
-        "b_star": float(val("b_star", tle._bstar, state_def, x).detach()),
+        "mean_anomaly": float(val(key="mean_anomaly", default=tle._mo, map_param_to_idx=map_param_to_idx, x=x).detach()),
+        "b_star": float(val(key="b_star", default=tle._bstar, map_param_to_idx=map_param_to_idx, x=x).detach()),
         # --- Static Parameters (Pass-through) ---
         "satellite_catalog_number": tle.satellite_catalog_number,
         "epoch_year": tle.epoch_year,
@@ -65,65 +65,65 @@ def update(
         opsmode="i",
         satn=sat_obj.satellite_catalog_number,
         epoch=(sat_obj._jdsatepoch + sat_obj._jdsatepochF) - 2433281.5,
-        xbstar=val("b_star", sat_obj._bstar, state_def, x),
+        xbstar=val(key="b_star", default=sat_obj._bstar, map_param_to_idx=map_param_to_idx, x=x),
         xndot=sat_obj._ndot,
         xnddot=sat_obj._nddot,
-        xecco=val("eccentricity", sat_obj._ecco, state_def, x),
-        xargpo=val("argument_of_perigee", sat_obj._argpo, state_def, x),
-        xinclo=val("inclination", sat_obj._inclo, state_def, x),
-        xmo=x[0],  # val("mean_anomaly", sat_obj._mo, state_def, x),
-        xno_kozai=val("mean_motion", sat_obj._no_kozai, state_def, x),
-        xnodeo=val("raan", sat_obj._nodeo, state_def, x),
+        xecco=val(key="eccentricity", default=sat_obj._ecco, map_param_to_idx=map_param_to_idx, x=x),
+        xargpo=val(key="argument_of_perigee", default=sat_obj._argpo, map_param_to_idx=map_param_to_idx, x=x),
+        xinclo=val(key="inclination", default=sat_obj._inclo, map_param_to_idx=map_param_to_idx, x=x),
+        xmo=x[0],  # val("mean_anomaly", sat_ob-j._mo, state_def, x),
+        xno_kozai=val(key="mean_motion", default=sat_obj._no_kozai, map_param_to_idx=map_param_to_idx, x=x),
+        xnodeo=val(key="raan", default=sat_obj._nodeo, map_param_to_idx=map_param_to_idx, x=x),
         satellite=sat_obj,
     )
 
     return sat_obj
 
 
-def dsgp4(
-    tle: TLE,
-    timestamps: torch.Tensor,
-    x: torch.Tensor | None = None,
-    state_def=None,
-    gravity_constant: str = "wgs-84",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Unified propagation function.
+# def dsgp4(
+#     tle: TLE,
+#     timestamps: torch.Tensor,
+#     x: torch.Tensor | None = None,
+#     map_param_to_idx=None,
+#     gravity_constant: str = "wgs-84",
+# ) -> tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     Unified propagation function.
 
-    Args:
-        tle: Base TLE object.
-        timestamps: (N,) Tensor of UNIX seconds.
-        x: (Optional) State vector tensor. If provided, enables gradients.
-        state_def: (Optional) Mapping for the state vector.
-        gravity_constant: Gravity model name.
+#     Args:
+#         tle: Base TLE object.
+#         timestamps: (N,) Tensor of UNIX seconds.
+#         x: (Optional) State vector tensor. If provided, enables gradients.
+#         map_param_to_idx: (Optional) Mapping for the state vector.
+#         gravity_constant: Gravity model name.
 
-    Returns:
-        pos: (N, 3) TEME Position (km)
-        vel: (N, 3) TEME Velocity (km/s)
-    """
+#     Returns:
+#         pos: (N, 3) TEME Position (km)
+#         vel: (N, 3) TEME Velocity (km/s)
+#     """
 
-    # 1. Time Setup (UNIX -> Minutes since TLE Epoch)
-    tle_epoch = get_tle_epoch_unix(tle)
-    tsince_min = (timestamps - tle_epoch) / 60.0
+#     # 1. Time Setup (UNIX -> Minutes since TLE Epoch)
+#     tle_epoch = get_tle_epoch_unix(tle)
+#     tsince_min = (timestamps - tle_epoch) / 60.0
 
-    # Handle batch dimension for dSGP4 (1, N)
-    if tsince_min.ndim == 1:
-        tsince_min = tsince_min.unsqueeze(0)
+#     # Handle batch dimension for dSGP4 (1, N)
+#     if tsince_min.ndim == 1:
+#         tsince_min = tsince_min.unsqueeze(0)
 
-    # 2. TLE Setup (Static vs Differentiable)
-    if x is None:
-        sat_obj = tle.copy()
-    else:
-        sat_obj = update(
-            tle=tle, x=x, state_def=state_def, gravity_constant=gravity_constant
-        )
+#     # 2. TLE Setup (Static vs Differentiable)
+#     if x is None:
+#         sat_obj = tle.copy()
+#     else:
+#         sat_obj = update(
+#             tle=tle, x=x, map_param_to_idx=map_param_to_idx, gravity_constant=gravity_constant
+#         )
 
-    # 4. Propagation
-    # Returns (Batch, Time, 2, 3)
-    state = sgp4(satellite=sat_obj, tsince=tsince_min)
+#     # 4. Propagation
+#     # Returns (Batch, Time, 2, 3)
+#     state = sgp4(satellite=sat_obj, tsince=tsince_min)
 
-    # 5. Unpack to (N, 3)
-    pos = state[:, 0]
-    vel = state[:, 1]
+#     # 5. Unpack to (N, 3)
+#     pos = state[:, 0]
+#     vel = state[:, 1]
 
-    return pos, vel
+#     return pos, vel
