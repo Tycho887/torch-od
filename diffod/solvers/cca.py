@@ -1,5 +1,4 @@
-from typing import Callable
-
+from collections.abc import Callable
 import torch
 from torch.func import jacfwd
 
