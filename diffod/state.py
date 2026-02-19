@@ -1,9 +1,9 @@
 import torch
 from dsgp4.tle import TLE
 # Assuming BiasGroup is available in diffod.utils
-from diffod.functional.tle import dsgp4
+from diffod.functional.tle import update
 from diffod.utils import BiasGroup 
-
+import dsgp4
 
 class StateDefinition:
     def __init__(
@@ -133,7 +133,7 @@ class StateDefinition:
         """
         return ~self.get_active_map(device=device)
     
-    def export(self, x) -> dsgp4.TLE:
+    def export(self, x: torch.Tensor) -> dsgp4.TLE:
         """
         Exports a TLE object with the given state vector.
         
@@ -141,4 +141,10 @@ class StateDefinition:
         :return: dsgp4 TLE object
         :rtype: dsgp4.TLE
         """
+        sat_obj = update(tle=self.init_tle,
+                         x=x,
+                         map_param_to_idx=self.map_param_to_idx)
         
+        assert isinstance(sat_obj, dsgp4.TLE)
+
+        return sat_obj

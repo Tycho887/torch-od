@@ -227,8 +227,9 @@ plt.tight_layout()
 
 plt.show()
 
-def propagate_func(x: torch.Tensor, tsince: torch.Tensor) -> torch.Tensor:
-    return functional_forward(x=x)
+tle = state_def.export(results["Gauss-Newton (WGN)"]["x"])
+
+print(tle)
 
 def compute_ric_residuals(
     tle: TLE, 
