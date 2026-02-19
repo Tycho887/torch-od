@@ -15,6 +15,8 @@ from diffod.gse import station_teme_preprocessor
 
 # Swapped out CCA for the WGN solver
 from diffod.solvers.gaussNewton import wgn_solve_single
+from diffod.solvers.newton import newton_solve_single
+
 
 # ---------------------------------------------------------
 # 1. Setup Data & Boundary
@@ -117,7 +119,7 @@ final_P_list = []
 # In wgn_test.py Section 5:
 for i in range(N_solves):
     x_in = x_init_batch[i]
-    x_out, P_out = wgn_solve_single(
+    x_out, P_out = newton_solve_single(
         x_init=x_in,
         y_obs_fixed=doppler_obs,
         forward_fn=functional_forward,
