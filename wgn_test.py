@@ -78,7 +78,7 @@ model = PredictDoppler(
 )
 
 def functional_forward(x) -> torch.Tensor:
-    return model(x=x, tsince=t_obs/60.0, st_pos=st_pos, st_vel=st_vel, center_freq=2.2e9)
+    return model(x=x, tsince=t_obs/60.0, st_pos=st_pos, st_vel=st_vel, center_freq=1.707e9)
 
 # ---------------------------------------------------------
 # 3. Generate Perturbed Starts for Monte Carlo
@@ -111,6 +111,9 @@ t0 = time.time()
 final_x_list = []
 final_P_list = []
 
+# compiled_solver = torch.compile(model=wgn_solve_single, dynamic=False, mode="reduce-overhead")
+
+
 # In wgn_test.py Section 5:
 for i in range(N_solves):
     x_in = x_init_batch[i]
@@ -120,7 +123,7 @@ for i in range(N_solves):
         forward_fn=functional_forward,
         sigma_obs=sigma_obs,
         estimate_mask=active_map,  # This tells the solver which columns of J to use
-        num_steps=5,
+        num_steps=10,
         # The following are passed but ignored by the new simplified solver
         P_x_inv=P_x_inv,
     )
