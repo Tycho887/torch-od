@@ -8,6 +8,7 @@ def compute_cca_step(
     residuals_fp64: torch.Tensor,
     sigma_obs: float,
     estimate_mask: torch.Tensor,
+    consider_mask: torch.Tensor,
     P_cc: torch.Tensor,
     P_x_inv: torch.Tensor,
     x_prior_res: torch.Tensor,
@@ -19,19 +20,15 @@ def compute_cca_step(
         H_total: The total Jacobian matrix of the residual function (n_obs, n_total).
         residuals_fp64: The residual vector y_calc - y_obs (n_obs,).
         sigma_obs: The standard deviation of observation noise.
-        estimate_mask: A boolean mask (n_total,) where True indicates parameters being estimated,
-                       and False indicates unestimated 'consider' parameters.
-        P_cc: The a priori covariance of consider parameters (n_consider, n_consider).
-        P_x_inv: The a priori information matrix for estimated parameters (n_estimated, n_estimated).
-        x_prior_res: The residual of current state vs prior state (n_estimated,).
-
-    Returns:
-        dx: The optimal state update vector for the estimated parameters (n_estimated,)
-        P_total: The total covariance matrix for the estimated parameters, including consider effects (n_estimated, n_estimated)
+        estimate_mask: Boolean mask indicating parameters being estimated.
+        consider_mask: Boolean mask indicating unestimated 'consider' parameters.
+        P_cc: A priori covariance of consider parameters (n_consider, n_consider).
+        P_x_inv: A priori information matrix for estimated params (n_estimated, n_estimated).
+        x_prior_res: Residual of current state vs prior state (n_estimated,).
     """
-    # 1. Partitioning the Jacobian
+    # 1. Partitioning the Jacobian using explicit masks
     H_x = H_total[:, estimate_mask]
-    H_c = H_total[:, ~estimate_mask]
+    H_c = H_total[:, consider_mask]
 
     # 2. Maximum Likelihood Step
     # Create the weight scalar/vector (W = R^-1).
@@ -47,11 +44,13 @@ def compute_cca_step(
     N_x += P_x_inv @ x_prior_res
 
     # 3. Optimize linear solves via a single Cholesky decomposition
-    # M_xx is symmetric positive definite, making Cholesky highly efficient
     L = torch.linalg.cholesky(M_xx)
 
     # Solve for the state update (dx)
     dx = torch.cholesky_solve(N_x.unsqueeze(-1), L).squeeze(-1)
+
+    print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
+
 
     # 4. Consider Covariance Step
     # Compute Cross-Coupling Matrix (M_xc)
@@ -69,15 +68,16 @@ def compute_cca_step(
     return dx, P_total
 
 
-def cca_solve_single(
+def cca_solve(
     x_init: torch.Tensor,
     y_obs_fixed: torch.Tensor,
     forward_fn: Callable[[torch.Tensor], torch.Tensor],
     sigma_obs: float,
     estimate_mask: torch.Tensor,
+    consider_mask: torch.Tensor,
     P_cc: torch.Tensor,
     P_x_inv: torch.Tensor,
-    n_estimated: int,
+    # n_estimated: int,
     num_steps: int = 5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -89,8 +89,7 @@ def cca_solve_single(
     x_apriori = x.clone()
 
     # Pre-allocate P_total to the correct dimension of estimated parameters
-    # n_estimated = int(estimate_mask.sum().item())
-    P_total = torch.eye(n_estimated, dtype=x.dtype, device=x.device)
+    P_total = torch.eye(len(estimate_mask)+len(consider_mask), dtype=x.dtype, device=x.device)
 
     def res_fn(state):
         return forward_fn(state) - y_obs_fixed
@@ -109,6 +108,7 @@ def cca_solve_single(
             residuals_fp64=residuals_val,
             sigma_obs=sigma_obs,
             estimate_mask=estimate_mask,
+            consider_mask=consider_mask,
             P_cc=P_cc,
             P_x_inv=P_x_inv,
             x_prior_res=x_prior_res,

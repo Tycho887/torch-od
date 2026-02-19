@@ -14,8 +14,9 @@ from diffod.functional.system import PredictDoppler
 from diffod.gse import station_teme_preprocessor
 
 # Swapped out CCA for the WGN solver
-from diffod.solvers.gaussNewton import wgn_solve_single
-from diffod.solvers.newton import newton_solve_single
+from diffod.solvers.gaussNewton import wgn_solve
+from diffod.solvers.newton import newton_solve
+from diffod.solvers.cca import cca_solve
 
 
 # ---------------------------------------------------------
@@ -37,6 +38,7 @@ target_device = torch.device("cpu")
 
 # Load real telemetry data
 period_telemetry = pl.read_parquet(source="data/period_telemetry.parquet")
+gps_data = pl.read_csv(source="data/gps_data.csv")
 
 times_unix = torch.tensor(period_telemetry["timestamp"].to_numpy(), dtype=torch.float64, device=target_device)
 doppler_obs = torch.tensor(period_telemetry["Doppler_Hz"].to_numpy(), dtype=torch.float64, device=target_device)
@@ -98,81 +100,115 @@ sigma_obs = 10.0
 n_total = x_true.shape[0]
 
 active_map = state_def.get_active_map(device=target_device)
-# estimate_map = active_map
-print(active_map)
+consider_map = ~active_map
 
-# Only the prior information matrix is needed for standard WGN
-P_x_inv = torch.eye(n=2, dtype=torch.float64, device=target_device) #* 1e-6
+n_active = int(active_map.sum().item())
+n_consider = n_total - n_active
+
+print(f"Total Params: {n_total} | Estimated: {n_active} | Considered: {n_consider}")
+
+# Prior information matrices for the solvers
+P_x_inv = torch.eye(n=n_active, dtype=torch.float64, device=target_device) # * 1e-6
+P_cc = torch.eye(n=n_consider, dtype=torch.float64, device=target_device)
 
 # ---------------------------------------------------------
 # 5. Execute Sequential Iterations & Benchmark
 # ---------------------------------------------------------
-print("Executing sequential WGN solves...")
-t0 = time.time()
+print("\nExecuting OD Solvers...")
 
-final_x_list = []
-final_P_list = []
+# Extract the single perturbed initial state for direct comparison
+x_in = x_init_batch[0]
 
-# compiled_solver = torch.compile(model=wgn_solve_single, dynamic=False, mode="reduce-overhead")
+# Dictionary to store results
+results = {}
 
+solvers = {
+    "Gauss-Newton (WGN)": wgn_solve,
+    "Exact Newton": newton_solve,
+    "Consider Covariance (CCA)": cca_solve,
+}
 
-# In wgn_test.py Section 5:
-for i in range(N_solves):
-    x_in = x_init_batch[i]
-    x_out, P_out = newton_solve_single(
-        x_init=x_in,
-        y_obs_fixed=doppler_obs,
-        forward_fn=functional_forward,
-        sigma_obs=sigma_obs,
-        estimate_mask=active_map,  # This tells the solver which columns of J to use
-        num_steps=10,
-        # The following are passed but ignored by the new simplified solver
-        P_x_inv=P_x_inv,
-    )
-    final_x_list.append(x_out)
-    final_P_list.append(P_out)
+# Run each solver and record metrics
+with torch.no_grad():
+    for name, solver_fn in solvers.items():
+        t0 = time.perf_counter()
+        
+        # Dispatch kwargs dynamically since CCA requires more specific inputs
+        kwargs = {
+            "x_init": x_in,
+            "y_obs_fixed": doppler_obs,
+            "forward_fn": functional_forward,
+            "sigma_obs": sigma_obs,
+            "estimate_mask": active_map,
+            "num_steps": 5,
+        }
+        
+        if name == "Consider Covariance (CCA)":
+            kwargs.update({
+                "consider_mask": consider_map,
+                "P_cc": P_cc,
+                "P_x_inv": P_x_inv,
+                # "n_estimated": n_active,
+            })
+            
+        x_out, P_out = solver_fn(**kwargs)
+        
+        t1 = time.perf_counter()
+        exec_time = (t1 - t0) * 1000
+        
+        results[name] = {
+            "x": x_out,
+            "P": P_out,
+            "time_ms": exec_time
+        }
+        print(f"{name:25} | Time: {exec_time:6.2f} ms | Cov Trace: {torch.trace(P_out[:7, :7]).item():.4e}")
 
-final_x_batch = torch.stack(tensors=final_x_list)
-final_P_batch = torch.stack(tensors=final_P_list)
-
-t1 = time.time()
-
-print(f"Time taken for {N_solves} sequential solves: {(t1 - t0) * 1000:.2f} ms")
-
-print("\nConvergence Check (First Solve vs Central State):")
-print(f"Central State: {x_true[:7].detach().cpu().numpy()}")
-print(f"Final Output:  {final_x_batch[0, :7].detach().cpu().numpy()}")
-print(f"Mean Output:   {final_x_batch.mean(dim=0)[:7].detach().cpu().numpy()}")
-print(f"Final Covariance Trace: {torch.trace(final_P_batch[0, :7, :7]).detach().cpu().numpy()}")
+print("\nConvergence Check (Final States):")
+print(f"Initial State: {x_in[:7].detach().cpu().numpy()}")
+for name, res in results.items():
+    print(f"{name:25}: {res['x'][:7].detach().cpu().numpy()}")
 
 # ---------------------------------------------------------
 # 6. Plotting Results
 # ---------------------------------------------------------
 print("\nGenerating plots...")
 
-# Disable gradients for inference to save memory and speed up computation
+# Precompute initial model fit
 with torch.no_grad():
-    y_init = functional_forward(x_init_batch[0]).cpu().numpy()
-    y_fit = functional_forward(final_x_batch[0]).cpu().numpy()
+    y_init = functional_forward(x_in).cpu().numpy()
 
-# Convert time to relative minutes for readability
 t_plot = (times_unix - times_unix[0]).cpu().numpy() / 60.0
 y_obs = doppler_obs.cpu().numpy()
 
+plt.figure(figsize=(14, 8))
 
+# Plot observations and initial guess
+plt.scatter(t_plot, y_obs, s=4, c='black', alpha=0.3, label='Observations')
+plt.plot(t_plot, y_init, 'r--', linewidth=1.5, alpha=0.6, label='Initial Guess')
 
-plt.figure(figsize=(12, 7))
+# Plot styling for each solver to make them distinguishable
+styles = {
+    "Gauss-Newton (WGN)": {"color": "blue", "linestyle": "-", "alpha": 0.8, "linewidth": 2},
+    "Exact Newton": {"color": "purple", "linestyle": "--", "alpha": 0.8, "linewidth": 2.5},
+    "Consider Covariance (CCA)": {"color": "green", "linestyle": ":", "alpha": 1.0, "linewidth": 3},
+}
 
-# Plot observations (scatter plot is usually best for real noisy telemetry)
-plt.scatter(t_plot, y_obs, s=4, c='black', alpha=0.5, label='Observations')
+# Compute and plot fitted curves for all solvers
+with torch.no_grad():
+    for name, res in results.items():
+        y_fit = functional_forward(res["x"]).cpu().numpy()
+        
+        # Calculate RMSE for the legend
+        rmse = np.sqrt(np.mean((y_fit - y_obs)**2))
+        
+        plt.plot(
+            t_plot, 
+            y_fit, 
+            label=f'{name} (RMSE: {rmse:.2f} Hz)', 
+            **styles[name]
+        )
 
-# Plot initial guess
-plt.plot(t_plot, y_init, 'r--', linewidth=1.5, label='Initial Guess')
-
-# Plot the converged WGN fit
-plt.plot(t_plot, y_fit, 'g-', linewidth=2, label='WGN Fitted Curve')
-
-plt.title('Doppler Shift Orbit Determination Fit', fontsize=14)
+plt.title('Doppler Shift Orbit Determination Fit Comparison', fontsize=14)
 plt.xlabel('Time since start of track (Minutes)', fontsize=12)
 plt.ylabel('Doppler Shift (Hz)', fontsize=12)
 plt.legend(loc='upper right', fontsize=11)

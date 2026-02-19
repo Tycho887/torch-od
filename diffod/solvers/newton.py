@@ -34,7 +34,7 @@ def solve_newton_step(
     
     return dx, P_cov
 
-def newton_solve_single(
+def newton_solve(
     x_init: torch.Tensor,
     y_obs_fixed: torch.Tensor,
     forward_fn: Callable[[torch.Tensor], torch.Tensor],

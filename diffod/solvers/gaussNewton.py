@@ -38,7 +38,7 @@ def solve_gn_step(
     
     return dx, P_cov
 
-def wgn_solve_single(
+def wgn_solve(
     x_init: torch.Tensor,
     y_obs_fixed: torch.Tensor,
     forward_fn: Callable[[torch.Tensor], torch.Tensor],
