@@ -3,7 +3,8 @@ from dsgp4.tle import TLE
 from dsgp4.util import from_datetime_to_mjd
 from dataclasses import dataclass
 import torch
-import polars as pl
+# import polars as pl
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 # from dsgp4.tle import TLE
@@ -36,6 +37,9 @@ def get_tle_epoch(tle: TLE) -> float | torch.Tensor:
     tle_epoch_mjd = from_datetime_to_mjd(datetime_obj=tle._epoch)
     return (tle_epoch_mjd - 40587.0) * 86400.0
 
+# import pandas as pd
+# import torch
+
 def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Reads GMAT CSV, converts to meters, and filters data around the TLE epoch.
@@ -43,14 +47,16 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     # GMAT space-delimited: Day Month Year Time X Y Z VX VY VZ
     df = pd.read_csv(file_path, skiprows=1, 
                      header=None, 
-                     delim_whitespace=True,
+                     sep=r'\s+', # Replaced delim_whitespace=True
                     )
     
     # Combine date/time columns (Assuming indices 0,1,2,3 for time)
     time_str = df[0].astype(str) + " " + df[1] + " " + df[2].astype(str) + " " + df[3]
     df['dt'] = pd.to_datetime(time_str, format='%d %b %Y %H:%M:%S.%f')
-    df['unix'] = df['dt'].astype('int64') // 10**9  # Seconds
+    df['unix'] = df['dt'].astype('int64') // 10**6  # Seconds
     
+    print(f"Minimum: {df['unix'].min()} | Maximum: {df['unix'].max()}")
+
     # Filter by time window (centered or trailing, usually trailing for block_sec)
     mask = (df['unix'] >= tle_epoch_unix) & (df['unix'] <= tle_epoch_unix + block_sec)
     df_block = df[mask].copy()
@@ -60,8 +66,13 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
 
     # Convert km to meters and extract arrays
     # Assuming: 4,5,6 are Pos (km) and 7,8,9 are Vel (km/s)
-    t_gps = df_block['unix'].values
-    gps_pos = df_block[[4, 5, 6]].values * 1000.0
-    gps_vel = df_block[[7, 8, 9]].values * 1000.0
+    t_gps_np = df_block['unix'].values
+    gps_pos_np = df_block[[4, 5, 6]].values * 1000.0
+    gps_vel_np = df_block[[7, 8, 9]].values * 1000.0
+    
+    # Convert NumPy arrays to PyTorch Tensors
+    t_gps = torch.from_numpy(np.copy(t_gps_np))
+    gps_pos = torch.from_numpy(np.copy(gps_pos_np))
+    gps_vel = torch.from_numpy(np.copy(gps_vel_np))
     
     return t_gps, gps_pos, gps_vel
