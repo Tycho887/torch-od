@@ -4,6 +4,7 @@ from string import whitespace
 import time
 import dsgp4
 import numpy as np
+from requests import get
 import torch
 import polars as pl
 import matplotlib.pyplot as plt
@@ -13,6 +14,7 @@ from dsgp4.tle import TLE
 from torch.utils.show_pickle import FakeClass
 import diffod.state as state
 from diffod.functional.system import PredictDoppler
+from diffod.utils import load_gmat_csv_block, get_tle_epoch
 from diffod.gse import station_teme_preprocessor
 
 # Swapped out CCA for the WGN solver
@@ -40,11 +42,11 @@ target_device = torch.device("cpu")
 
 # Load real telemetry data
 period_telemetry = pl.read_parquet(source="data/period_telemetry.parquet")
-gps_data = pl.read_csv(source="data/gps_data.csv")
-gps_data_pd = pd.read_fwf(gps_data_path)
-    gps_data = pl.from_pandas(gps_data_pd)
+# gps_data = pl.read_csv(source="data/gps_data.csv")
+# gps_data_pd = pd.read_fwf("data/gps_data.csv")
+# gps_data = pl.from_pandas(gps_data_pd)
+# print(gps_data)
 
-print(gps_data.columns)
 """
 Sat.UTCGregorian          
 Sat.TEME_Earth.X          
@@ -229,12 +231,17 @@ plt.ylabel('Doppler Shift (Hz)', fontsize=12)
 plt.legend(loc='upper right', fontsize=11)
 plt.grid(True, linestyle=':', alpha=0.7)
 plt.tight_layout()
-
-plt.show()
+plt.close()
 
 tle = state_def.export(results["Gauss-Newton (WGN)"]["x"])
 
 print(tle)
+
+t_gps, gps_pos, gps_vel = load_gmat_csv_block(
+    file_path="data/gps_data.csv",
+    tle_epoch_unix = get_tle_epoch(tle),
+    block_sec=24*60*60,
+)
 
 def compute_ric_residuals(
     tle: TLE, 
@@ -307,61 +314,62 @@ def compute_ric_residuals(
     return t_since_mins, pos_ric, vel_ric
 
 
-t_since_mins, pos_ric, vel_ric = compute_ric_residuals(
-    tle=tle,
-    gps_data=gps_data,
-    tle_epoch_unix=epoch,
-    device=target_device,
-)
+# t_since_mins, pos_ric, vel_ric = compute_ric_residuals(
+#     tle=tle,
+#     gps_data=gps_data,
+#     tle_epoch_unix=epoch,
+#     device=target_device,
+# )
 
+# print(pos_ric.shape, vel_ric.shape)
 
-def plot_ric_residuals(
-    t_mins: torch.Tensor, 
-    results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
-):
-    """
-    Generates a 2x3 subplot grid comparing the RIC residuals of different models.
+# def plot_ric_residuals(
+#     t_mins: torch.Tensor, 
+#     results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
+# ):
+#     """
+#     Generates a 2x3 subplot grid comparing the RIC residuals of different models.
     
-    Args:
-        t_mins: Time vector in minutes since epoch (N,)
-        results_dict: Dictionary mapping model name to (pos_ric, vel_ric) tensors.
-                      e.g., {"Initial TLE": (pos_init, vel_init), "Optimized": (pos_opt, vel_opt)}
-    """
-    t_plot = t_mins.detach().cpu().numpy()
+#     Args:
+#         t_mins: Time vector in minutes since epoch (N,)
+#         results_dict: Dictionary mapping model name to (pos_ric, vel_ric) tensors.
+#                       e.g., {"Initial TLE": (pos_init, vel_init), "Optimized": (pos_opt, vel_opt)}
+#     """
+#     t_plot = t_mins.detach().cpu().numpy()
     
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
-    components = ['Radial', 'Along-track', 'Cross-track']
+#     fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
+#     components = ['Radial', 'Along-track', 'Cross-track']
     
-    styles = {
-        "Initial TLE": {"color": "red", "linestyle": "--", "alpha": 0.7},
-        "Optimized": {"color": "green", "linestyle": "-", "alpha": 0.9, "linewidth": 2}
-    }
+#     styles = {
+#         "Initial TLE": {"color": "red", "linestyle": "--", "alpha": 0.7},
+#         "Optimized": {"color": "green", "linestyle": "-", "alpha": 0.9, "linewidth": 2}
+#     }
 
-    for name, (pos_ric, vel_ric) in results_dict.items():
-        pos_np = pos_ric.detach().cpu().numpy()
-        vel_np = vel_ric.detach().cpu().numpy()
+#     for name, (pos_ric, vel_ric) in results_dict.items():
+#         pos_np = pos_ric.detach().cpu().numpy()
+#         vel_np = vel_ric.detach().cpu().numpy()
         
-        # Default style if name not in dict
-        style = styles.get(name, {"linestyle": "-", "alpha": 0.8})
+#         # Default style if name not in dict
+#         style = styles.get(name, {"linestyle": "-", "alpha": 0.8})
 
-        for i in range(3):
-            # Position row
-            axes[0, i].plot(t_plot, pos_np[:, i], label=name, **style)
-            # Velocity row
-            axes[1, i].plot(t_plot, vel_np[:, i], label=name, **style)
+#         for i in range(3):
+#             # Position row
+#             axes[0, i].plot(t_plot, pos_np[:, i], label=name, **style)
+#             # Velocity row
+#             axes[1, i].plot(t_plot, vel_np[:, i], label=name, **style)
 
-    # Formatting
-    for i, comp in enumerate(components):
-        axes[0, i].set_title(f'{comp} Error')
-        axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
-        axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
-        axes[1, i].set_xlabel('Time Since Epoch (Minutes)')
+#     # Formatting
+#     for i, comp in enumerate(components):
+#         axes[0, i].set_title(f'{comp} Error')
+#         axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
+#         axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
+#         axes[1, i].set_xlabel('Time Since Epoch (Minutes)')
         
-        for row in range(2):
-            axes[row, i].grid(True, linestyle=':', alpha=0.7)
-            if i == 0 and row == 0:
-                axes[row, i].legend(loc='best')
+#         for row in range(2):
+#             axes[row, i].grid(True, linestyle=':', alpha=0.7)
+#             if i == 0 and row == 0:
+#                 axes[row, i].legend(loc='best')
 
-    plt.suptitle('GPS vs TLE Residuals in RIC Frame', fontsize=16)
-    plt.tight_layout()
-    plt.show()
+#     plt.suptitle('GPS vs TLE Residuals in RIC Frame', fontsize=16)
+#     plt.tight_layout()
+#     plt.show()
