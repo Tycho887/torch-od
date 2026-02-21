@@ -237,61 +237,53 @@ tle = state_def.export(results["Gauss-Newton (WGN)"]["x"])
 
 print(tle)
 
-t_gps, gps_pos, gps_vel = load_gmat_csv_block(
-    file_path="data/gps_data.csv",
-    tle_epoch_unix = get_tle_epoch(tle),
-    block_sec=24*60*60,
-)
+# t_gps, gps_pos, gps_vel = load_gmat_csv_block(
+#     file_path="data/gps_data.csv",
+#     tle_epoch_unix = get_tle_epoch(tle),
+#     block_sec=24*60*60,
+# )
+
+import torch
+import matplotlib.pyplot as plt
+import dsgp4 # Assuming this is the module for propagation
 
 def compute_ric_residuals(
-    tle: TLE, 
-    gps_data: pl.DataFrame, 
+    tle, 
+    t_gps: torch.Tensor, 
+    r_gps: torch.Tensor, 
+    v_gps: torch.Tensor, 
     tle_epoch_unix: float,
-    device: torch.device = torch.device("cpu")
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Computes position and velocity residuals in the Radial, Along-track, 
     and Cross-track (RIC) frame.
-    """
-    # 1. Extract GPS Ground Truth 
-    # (Assuming UTCGregorian is already parsed or you have Unix times aligned)
-    # If not, you can parse it via polars: gps_data.with_columns(pl.col("Sat.UTCGregorian").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S.%f"))
-    gps_unix = torch.tensor(gps_data.select(["Sat.UTCGregorian"]).to_numpy(), dtype=torch.float64, device=device)
     
-    r_gps = torch.tensor(
-        gps_data.select(["Sat.TEME_Earth.X", "Sat.TEME_Earth.Y", "Sat.TEME_Earth.Z"]).to_numpy(),
-        dtype=torch.float64, device=device
-    )
-    v_gps = torch.tensor(
-        gps_data.select(["Sat.TEME_Earth.VX", "Sat.TEME_Earth.VY", "Sat.TEME_Earth.VZ"]).to_numpy(),
-        dtype=torch.float64, device=device
-    )
+    Expects r_gps and v_gps in meters (from load_gmat_csv_block). 
+    Outputs residuals in kilometers to match SGP4 and plotting defaults.
+    """
+    # 1. Convert GPS inputs from meters back to kilometers for SGP4 math
+    r_gps_km = r_gps.to(torch.float64) / 1000.0
+    v_gps_km = v_gps.to(torch.float64) / 1000.0
+    t_gps = t_gps.to(torch.float64)
 
     # 2. Propagate TLE to GPS timestamps
-    t_since_mins = (gps_unix - tle_epoch_unix) / 60.0
+    t_since_mins = (t_gps - tle_epoch_unix) / 60.0
     
-    # NOTE: Replace this with your specific DSGP4 propagation call
-    # It should return r_calc and v_calc of shape (N, 3) in TEME
-
+    # dsgp4 returns shape (N, 2, 3) where [:, 0] is pos, [:, 1] is vel
     r_tot = dsgp4.propagate(tle, t_since_mins, initialized=False)
+    r_calc_km = r_tot[:, 0]
+    v_calc_km = r_tot[:, 1]
 
-    r_calc = r_tot[:, 0]
-    v_calc = r_tot[:, 1]
-
-    # r_calc = torch.zeros_like(r_gps) # Placeholder
-    # v_calc = torch.zeros_like(v_gps) # Placeholder
-    # r_calc, v_calc = sgp4_propagate(tle, t_since_mins) 
-
-    # 3. Calculate Cartesian Errors
-    delta_r = r_calc - r_gps
-    delta_v = v_calc - v_gps
+    # 3. Calculate Cartesian Errors (Calculated - Truth)
+    delta_r = r_calc_km - r_gps_km
+    delta_v = v_calc_km - v_gps_km
 
     # 4. Construct RIC Basis Vectors (using GPS state as the reference)
     # Radial unit vector
-    R_hat = r_gps / torch.norm(r_gps, dim=1, keepdim=True)
+    R_hat = r_gps_km / torch.norm(r_gps_km, dim=1, keepdim=True)
     
     # Cross-track (Normal) unit vector: r x v
-    W_vec = torch.cross(r_gps, v_gps, dim=1)
+    W_vec = torch.cross(r_gps_km, v_gps_km, dim=1)
     W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
     
     # Along-track (Transverse) unit vector: w x r
@@ -313,63 +305,77 @@ def compute_ric_residuals(
 
     return t_since_mins, pos_ric, vel_ric
 
-
-# t_since_mins, pos_ric, vel_ric = compute_ric_residuals(
-#     tle=tle,
-#     gps_data=gps_data,
-#     tle_epoch_unix=epoch,
-#     device=target_device,
-# )
-
-# print(pos_ric.shape, vel_ric.shape)
-
-# def plot_ric_residuals(
-#     t_mins: torch.Tensor, 
-#     results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
-# ):
-#     """
-#     Generates a 2x3 subplot grid comparing the RIC residuals of different models.
+def plot_ric_residuals(
+    t_mins: torch.Tensor, 
+    results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
+):
+    """
+    Generates a 2x3 subplot grid comparing the RIC residuals of different models.
     
-#     Args:
-#         t_mins: Time vector in minutes since epoch (N,)
-#         results_dict: Dictionary mapping model name to (pos_ric, vel_ric) tensors.
-#                       e.g., {"Initial TLE": (pos_init, vel_init), "Optimized": (pos_opt, vel_opt)}
-#     """
-#     t_plot = t_mins.detach().cpu().numpy()
+    Args:
+        t_mins: Time vector in minutes since epoch (N,)
+        results_dict: Dictionary mapping model name to (pos_ric, vel_ric) tensors.
+                      e.g., {"Initial TLE": (pos_init, vel_init), "Optimized": (pos_opt, vel_opt)}
+    """
+    t_plot = t_mins.detach().cpu().numpy()
     
-#     fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
-#     components = ['Radial', 'Along-track', 'Cross-track']
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
+    components = ['Radial', 'Along-track', 'Cross-track']
     
-#     styles = {
-#         "Initial TLE": {"color": "red", "linestyle": "--", "alpha": 0.7},
-#         "Optimized": {"color": "green", "linestyle": "-", "alpha": 0.9, "linewidth": 2}
-#     }
+    styles = {
+        "Initial TLE": {"color": "red", "linestyle": "--", "alpha": 0.7},
+        "Optimized": {"color": "green", "linestyle": "-", "alpha": 0.9, "linewidth": 2}
+    }
 
-#     for name, (pos_ric, vel_ric) in results_dict.items():
-#         pos_np = pos_ric.detach().cpu().numpy()
-#         vel_np = vel_ric.detach().cpu().numpy()
+    for name, (pos_ric, vel_ric) in results_dict.items():
+        pos_np = pos_ric.detach().cpu().numpy()
+        vel_np = vel_ric.detach().cpu().numpy()
         
-#         # Default style if name not in dict
-#         style = styles.get(name, {"linestyle": "-", "alpha": 0.8})
+        # Default style if name not in dict
+        style = styles.get(name, {"linestyle": "-", "alpha": 0.8})
 
-#         for i in range(3):
-#             # Position row
-#             axes[0, i].plot(t_plot, pos_np[:, i], label=name, **style)
-#             # Velocity row
-#             axes[1, i].plot(t_plot, vel_np[:, i], label=name, **style)
+        for i in range(3):
+            # Position row
+            axes[0, i].plot(t_plot, pos_np[:, i], label=name, **style)
+            # Velocity row
+            axes[1, i].plot(t_plot, vel_np[:, i], label=name, **style)
 
-#     # Formatting
-#     for i, comp in enumerate(components):
-#         axes[0, i].set_title(f'{comp} Error')
-#         axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
-#         axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
-#         axes[1, i].set_xlabel('Time Since Epoch (Minutes)')
+    # Formatting
+    for i, comp in enumerate(components):
+        axes[0, i].set_title(f'{comp} Error')
+        axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
+        axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
+        axes[1, i].set_xlabel('Time Since Epoch (Minutes)')
         
-#         for row in range(2):
-#             axes[row, i].grid(True, linestyle=':', alpha=0.7)
-#             if i == 0 and row == 0:
-#                 axes[row, i].legend(loc='best')
+        for row in range(2):
+            axes[row, i].grid(True, linestyle=':', alpha=0.7)
+            if i == 0 and row == 0:
+                axes[row, i].legend(loc='best')
 
-#     plt.suptitle('GPS vs TLE Residuals in RIC Frame', fontsize=16)
-#     plt.tight_layout()
-#     plt.show()
+    plt.suptitle('GPS vs TLE Residuals in RIC Frame', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+# 1. Load Data
+t_gps, r_gps, v_gps = load_gmat_csv_block(
+    file_path="data/gps_data.csv",
+    tle_epoch_unix=epoch,
+    block_sec=24*60*60,
+)
+
+# 2. Compute Initial Residuals
+t_mins, pos_ric_init, vel_ric_init = compute_ric_residuals(
+    tle=init_tle, 
+    t_gps=t_gps, 
+    r_gps=r_gps, 
+    v_gps=v_gps, 
+    tle_epoch_unix=epoch
+)
+
+# 3. Create Dictionary & Plot
+results = {
+    "Initial TLE": (pos_ric_init, vel_ric_init)
+    # "Optimized": (pos_ric_opt, vel_ric_opt)  <-- Add this once you convert state back to TLE
+}
+
+plot_ric_residuals(t_mins, results)
