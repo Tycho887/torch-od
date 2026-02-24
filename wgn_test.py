@@ -92,7 +92,7 @@ ssv = state.SSV(
 ssv.add_linear_bias(name="doppler_bias", group_indices=contacts)
 
 # --- NEW MODULAR PIPELINE ---
-propagator = system.SGP4Propagator(ssv=ssv, use_pretrained_model=True)
+propagator = system.SGP4(ssv=ssv, use_pretrained_model=True)
 measurement_model = system.DopplerMeasurement(
     ssv=ssv, 
     bias_group=ssv.get_bias_group(name="doppler_bias")
@@ -107,7 +107,7 @@ def functional_forward(x) -> torch.Tensor:
 # ---------------------------------------------------------
 x_true = ssv.get_initial_state(device=target_device)
 
-N_solves = 1
+N_solves = 10
 x_init_batch = x_true.unsqueeze(0).repeat(N_solves, 1)
 x_init_batch = x_init_batch + x_init_batch * torch.randn_like(x_init_batch) * 1e-4
 
