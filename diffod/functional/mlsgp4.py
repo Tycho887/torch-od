@@ -1,9 +1,7 @@
-from typing import Callable
-
 import torch
 import torch.nn as nn
-from torch.nn.functional import relu
 from torch.nn.parameter import Parameter
+from diffod.functional.sgp4 import sgp4_propagate
 
 
 class FunctionalMLdSGP4(nn.Module):
@@ -14,35 +12,50 @@ class FunctionalMLdSGP4(nn.Module):
         hidden_size=35,
         input_correction=1e-2,
         output_correction=0.8,
+        dtype=torch.float64, # High precision standard for orbital mechanics
+        device=torch.device("cpu"),
     ):
         super().__init__()
-        self.fc1 = nn.Linear(6, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, 6)
-        self.fc4 = nn.Linear(6, hidden_size)
-        self.fc5 = nn.Linear(hidden_size, hidden_size)
-        self.fc6 = nn.Linear(hidden_size, 6)
+        
+        # 1. Device and Dtype Initialization
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        
+        self.fc1 = nn.Linear(6, hidden_size, **factory_kwargs)
+        self.fc2 = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
+        self.fc3 = nn.Linear(hidden_size, 6, **factory_kwargs)
+        self.fc4 = nn.Linear(6, hidden_size, **factory_kwargs)
+        self.fc5 = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
+        self.fc6 = nn.Linear(hidden_size, 6, **factory_kwargs)
 
         self.tanh = nn.Tanh()
         self.leaky_relu = nn.LeakyReLU(negative_slope=0.01)
         self.normalization_R = normalization_R
         self.normalization_V = normalization_V
-        self.input_correction = Parameter(input_correction * torch.ones(6))
-        self.output_correction = Parameter(output_correction * torch.ones(6))
+        
+        self.input_correction = Parameter(torch.full((6,), input_correction, **factory_kwargs))
+        self.output_correction = Parameter(torch.full((6,), output_correction, **factory_kwargs))
 
     def forward(
         self,
         tsince: torch.Tensor,
-        sgp4_propagate: Callable[
-            [torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
-        ],
         **sgp4_kwargs,
     ):
         """
         Forward pass using a purely functional SGP4 propagator.
-        Assumes `sgp4_propagate` returns a tuple of (position, velocity) tensors.
         """
-        # 1. Stack parameters (using dim=-1 supports both scalar and batched inputs seamlessly)
+        # 2. Dynamic Memory Placement
+        # Read the current device in case the model was moved via .to(device)
+        current_device = self.input_correction.device
+        device_type = current_device.type if current_device.type in ['cuda', 'cpu', 'xpu'] else 'cpu'
+
+        # Ensure inputs are on the same device as the model parameters
+        tsince = tsince.to(current_device)
+        sgp4_kwargs = {
+            k: v.to(current_device) if isinstance(v, torch.Tensor) else v 
+            for k, v in sgp4_kwargs.items()
+        }
+
+        # Stack parameters
         x0 = torch.stack(
             (
                 sgp4_kwargs["ecco"],
@@ -55,12 +68,19 @@ class FunctionalMLdSGP4(nn.Module):
             dim=-1,
         )
 
-        # 2. Input Correction Pass
-        x = self.leaky_relu(self.fc1(x0))
-        x = self.leaky_relu(self.fc2(x))
-        x_corrected = x0 * (1 + self.input_correction * self.tanh(self.fc3(x)))
+        # 3. Autocasting (Input Correction)
+        # We isolate the NN in autocast to allow fp16/bf16 acceleration, 
+        # while keeping the orbital state in fp64 to prevent catastrophic cancellation.
+        with torch.autocast(device_type=device_type, enabled=True):
+            # Pass original tensor directly; autocast handles the downcasting
+            x = self.leaky_relu(self.fc1(x0))
+            x = self.leaky_relu(self.fc2(x)) # Fixed: Was previously taking x0_fp32, overwriting x
+            nn_correction = self.tanh(self.fc3(x))
+            
+        # Cast NN output back to the original high-precision dtype
+        x_corrected = x0 * (1 + self.input_correction * nn_correction.to(x0.dtype))
 
-        # 3. Update kwargs purely functionally (no in-place modification of original dict)
+        # Update kwargs purely functionally
         updated_kwargs = {k: v for k, v in sgp4_kwargs.items()}
         updated_kwargs.update(
             {
@@ -73,20 +93,23 @@ class FunctionalMLdSGP4(nn.Module):
             }
         )
 
-        # 4. Execute custom functional propagation
+        # Execute custom functional propagation (Maintained in fp64)
         pos, vel = sgp4_propagate(tsince, **updated_kwargs)
 
-        # 5. Output Correction Pass
-        # Normalize outputs before passing to the network
+        # 4. Autocasting (Output Correction)
         x_out = torch.cat(
             (pos / self.normalization_R, vel / self.normalization_V), dim=-1
         )
 
-        x = self.leaky_relu(self.fc4(x_out))
-        x = self.leaky_relu(self.fc5(x))
-        x_final_norm = x_out * (1 + self.output_correction * self.tanh(self.fc6(x)))
+        with torch.autocast(device_type=device_type, enabled=True):
+            x = self.leaky_relu(self.fc4(x_out))
+            x = self.leaky_relu(self.fc5(x))
+            nn_out_correction = self.tanh(self.fc6(x))
+            
+        # Apply the final correction in high precision
+        x_final_norm = x_out * (1 + self.output_correction * nn_out_correction.to(x_out.dtype))
 
-        # Denormalize to return physical state vectors (km, km/s)
+        # Denormalize to return physical state vectors
         pos_corrected = x_final_norm[..., :3] * self.normalization_R
         vel_corrected = x_final_norm[..., 3:] * self.normalization_V
 
@@ -95,14 +118,14 @@ class FunctionalMLdSGP4(nn.Module):
     def load_model(
         self,
         path: str = "models/mldsgp4_example_model.pth",
-        device: torch.device | str = "cpu",
     ):
         """
         Loads the pre-trained ESA weights.
-        Note: The checkpoint file must have been trained with or truncated to hidden_size=35.
         """
+        # Dynamically load to the module's current device
+        current_device = self.input_correction.device
         state_dict = torch.load(
-            path, map_location=torch.device(device), weights_only=True
+            path, map_location=current_device, weights_only=True
         )
         self.load_state_dict(state_dict)
         self.eval()

@@ -92,7 +92,7 @@ ssv = state.SSV(
 ssv.add_linear_bias(name="doppler_bias", group_indices=contacts)
 
 # --- NEW MODULAR PIPELINE ---
-propagator = system.SGP4Propagator(ssv=ssv)
+propagator = system.SGP4Propagator(ssv=ssv, use_pretrained_model=True)
 measurement_model = system.DopplerMeasurement(
     ssv=ssv, 
     bias_group=ssv.get_bias_group(name="doppler_bias")
@@ -135,7 +135,7 @@ P_cc = torch.eye(n=n_consider, dtype=torch.float64, device=target_device)
 print("\nExecuting OD Solvers...")
 
 # Extract the single perturbed initial state for direct comparison
-x_in = x_init_batch[0]
+x_in = x_init_batch[0].type(torch.float64)
 
 # Dictionary to store results
 results = {}
@@ -193,7 +193,7 @@ print("\nGenerating plots...")
 
 # Precompute initial model fit
 with torch.no_grad():
-    y_init = functional_forward(x_in).cpu().numpy()
+    y_init = functional_forward(x=x_in).cpu().numpy()
 
 t_plot = (times_unix - times_unix[0]).cpu().numpy() / 60.0
 y_obs = doppler_obs.cpu().numpy()
