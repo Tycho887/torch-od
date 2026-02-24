@@ -4,34 +4,7 @@ from diffod.functional.mlsgp4 import FunctionalMLdSGP4
 from diffod.functional.sgp4 import sgp4_propagate
 from diffod.physics import apply_linear_bias, compute_doppler
 
-class SGP4Propagator(nn.Module):
-    """
-    Generates ephemeris (position, velocity) from SGP4 state variables.
-    """
-    def __init__(
-        self,
-        ssv,
-        use_pretrained_model: bool = False,
-        surrogate_weights_path: str = "models/mldsgp4_example_model.pth",
-    ) -> None:
-        super().__init__()
-        self.ssv = ssv
-        self.use_pretrained_model = use_pretrained_model
-        
-        if self.use_pretrained_model:
-            self.surrogate_model = FunctionalMLdSGP4()
-            self.surrogate_model.load_state_dict(torch.load(surrogate_weights_path))
-            self.surrogate_model.eval()
-            self.surrogate_model.requires_grad_(False)
-            self.model = self.surrogate_model
-        else:
-            self.model = sgp4_propagate
 
-    def forward(self, x: torch.Tensor, tsince: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        sgp4_args = self.ssv.get_functional_args(x)
-        sat_pos, sat_vel = self.model(tsince=tsince, **sgp4_args)
-        return sat_pos, sat_vel
-        
 class SGP4(nn.Module):
     """
     Generates ephemeris (position, velocity) from SGP4 state variables.
