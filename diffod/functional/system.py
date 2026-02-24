@@ -10,12 +10,12 @@ class SGP4Propagator(nn.Module):
     """
     def __init__(
         self,
-        state_def,
+        ssv,
         use_pretrained_model: bool = False,
         surrogate_weights_path: str = "models/mldsgp4_example_model.pth",
     ) -> None:
         super().__init__()
-        self.state_def = state_def
+        self.ssv = ssv
         self.use_pretrained_model = use_pretrained_model
         
         if self.use_pretrained_model:
@@ -28,7 +28,7 @@ class SGP4Propagator(nn.Module):
             self.model = sgp4_propagate
 
     def forward(self, x: torch.Tensor, tsince: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        sgp4_args = self.state_def.get_functional_args(x)
+        sgp4_args = self.ssv.get_functional_args(x)
         sat_pos, sat_vel = self.model(tsince=tsince, **sgp4_args)
         return sat_pos, sat_vel
         
@@ -67,9 +67,9 @@ class DopplerMeasurement(nn.Module):
     """
     Computes Doppler observables and applies biases given arbitrary ephemeris.
     """
-    def __init__(self, state_def, bias_group=None) -> None:
+    def __init__(self, ssv, bias_group=None) -> None:
         super().__init__()
-        self.state_def = state_def
+        self.ssv = ssv
         self.bias_group = bias_group
 
     def forward(
@@ -115,14 +115,14 @@ class DopplerMeasurement(nn.Module):
 
 #     def __init__(
 #         self,
-#         state_def,
+#         ssv,
 #         bias_group=None,
 #         use_pretrained_model: bool = False,
 #         surrogate_weights_path: str = "models/mldsgp4_example_model.pth",
 #     ) -> None:
 #         super().__init__()
 #         # Structural metadata
-#         self.state_def = state_def
+#         self.ssv = ssv
 #         self.bias_group = bias_group
 
 #         # Surrogate model initialization
@@ -150,7 +150,7 @@ class DopplerMeasurement(nn.Module):
 #         All observation data is injected at inference time.
 #         """
 #         # 1. Propagate Orbit
-#         sgp4_args = self.state_def.get_functional_args(x)
+#         sgp4_args = self.ssv.get_functional_args(x)
 
 #         # Branch based on initialization
 #         if self.use_pretrained_model:
@@ -184,12 +184,12 @@ class DopplerMeasurement(nn.Module):
 # class ComputeDopplerGPS(nn.Module):
 #     def __init__(
 #         self,
-#         state_def,
+#         ssv,
 #         bias_group=None,
 #     ) -> None:
 #         super().__init__()
 
-#         self.state_def = state_def
+#         self.ssv = ssv
 #         self.bias_group = bias_group
 
 #     def forward(

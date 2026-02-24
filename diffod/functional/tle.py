@@ -71,7 +71,7 @@ def update(
         xecco=val(key="eccentricity", default=sat_obj._ecco, map_param_to_idx=map_param_to_idx, x=x),
         xargpo=val(key="argument_of_perigee", default=sat_obj._argpo, map_param_to_idx=map_param_to_idx, x=x),
         xinclo=val(key="inclination", default=sat_obj._inclo, map_param_to_idx=map_param_to_idx, x=x),
-        xmo=x[0],  # val("mean_anomaly", sat_ob-j._mo, state_def, x),
+        xmo=x[0],  # val("mean_anomaly", sat_ob-j._mo, ssv, x),
         xno_kozai=val(key="mean_motion", default=sat_obj._no_kozai, map_param_to_idx=map_param_to_idx, x=x),
         xnodeo=val(key="raan", default=sat_obj._nodeo, map_param_to_idx=map_param_to_idx, x=x),
         satellite=sat_obj,

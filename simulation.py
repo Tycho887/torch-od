@@ -61,7 +61,7 @@ st_vel = station_vel_cpu.to(device=target_device)
 # ---------------------------------------------------------
 # 2. Define State Vector & Functional Forward
 # ---------------------------------------------------------
-state_def = state.StateDefinition(
+ssv = state.SSV(
     init_tle=init_tle,
     num_measurements=N_samples,
     fit_ma=True,
@@ -72,10 +72,10 @@ state_def = state.StateDefinition(
     fit_eccentricity=True,
     fit_raan=True,
 )
-state_def.add_linear_bias(name="doppler_bias", group_indices=contacts)
+ssv.add_linear_bias(name="doppler_bias", group_indices=contacts)
 
 model = PredictDoppler(
-    state_def=state_def, bias_group=state_def.get_bias_group(name="doppler_bias")
+    ssv=ssv, bias_group=ssv.get_bias_group(name="doppler_bias")
 )
 
 def functional_forward(x) -> torch.Tensor:
@@ -84,7 +84,7 @@ def functional_forward(x) -> torch.Tensor:
 # ---------------------------------------------------------
 # 3. Generate Perturbed Starts for Monte Carlo
 # ---------------------------------------------------------
-x_true = state_def.get_initial_state(device=target_device)
+x_true = ssv.get_initial_state(device=target_device)
 
 N_solves = 1
 # Create Monte Carlo initial guesses around the central state
@@ -98,7 +98,7 @@ sigma_obs = 10.0
 n_total = x_true.shape[0]
 
 consider_params = ["b_star", "eccentricity"]
-estimate_map = state_def.get_estimate_map(
+estimate_map = ssv.get_estimate_map(
     consider_params=consider_params, device=target_device
 )
 

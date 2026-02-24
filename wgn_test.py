@@ -6,7 +6,7 @@ import polars as pl
 import matplotlib.pyplot as plt
 from dsgp4.tle import TLE
 import diffod.state as state
-from diffod.functional.system import PredictDoppler
+import diffod.functional.system as system
 from diffod.utils import load_gmat_csv_block
 from diffod.gse import station_teme_preprocessor
 # Swapped out CCA for the WGN solver
@@ -75,7 +75,10 @@ st_vel = station_vel_cpu.to(device=target_device)
 # ---------------------------------------------------------
 # 2. Define State Vector & Functional Forward
 # ---------------------------------------------------------
-state_def = state.SSV(
+# ---------------------------------------------------------
+# 2. Define State Vector & Functional Forward
+# ---------------------------------------------------------
+ssv = state.SSV(
     init_tle=init_tle,
     num_measurements=N_samples,
     fit_ma=True,
@@ -86,19 +89,23 @@ state_def = state.SSV(
     fit_eccentricity=False,
     fit_raan=False,
 )
-state_def.add_linear_bias(name="doppler_bias", group_indices=contacts)
+ssv.add_linear_bias(name="doppler_bias", group_indices=contacts)
 
-model = PredictDoppler(
-    state_def=state_def, bias_group=state_def.get_bias_group(name="doppler_bias")
+# --- NEW MODULAR PIPELINE ---
+propagator = system.SGP4Propagator(ssv=ssv)
+measurement_model = system.DopplerMeasurement(
+    ssv=ssv, 
+    bias_group=ssv.get_bias_group(name="doppler_bias")
 )
+model = system.MeasurementPipeline(propagator=propagator, measurement_model=measurement_model)
+# ----------------------------
 
 def functional_forward(x) -> torch.Tensor:
     return model(x=x, tsince=t_obs/60.0, st_pos=st_pos, st_vel=st_vel, center_freq=1.707e9)
-
 # ---------------------------------------------------------
 # 3. Generate Perturbed Starts for Monte Carlo
 # ---------------------------------------------------------
-x_true = state_def.get_initial_state(device=target_device)
+x_true = ssv.get_initial_state(device=target_device)
 
 N_solves = 1
 x_init_batch = x_true.unsqueeze(0).repeat(N_solves, 1)
@@ -110,7 +117,7 @@ x_init_batch = x_init_batch + x_init_batch * torch.randn_like(x_init_batch) * 1e
 sigma_obs = 10.0  
 n_total = x_true.shape[0]
 
-active_map = state_def.get_active_map(device=target_device)
+active_map = ssv.get_active_map(device=target_device)
 consider_map = ~active_map
 
 n_active = int(active_map.sum().item())
@@ -227,7 +234,7 @@ plt.grid(True, linestyle=':', alpha=0.7)
 plt.tight_layout()
 plt.show()
 
-tle = state_def.export(results["Gauss-Newton (WGN)"]["x"])
+tle = ssv.export(results["Gauss-Newton (WGN)"]["x"])
 
 def compute_ric_residuals(
     tle, 
