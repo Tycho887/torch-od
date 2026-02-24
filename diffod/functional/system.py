@@ -36,7 +36,7 @@ class SGP4(nn.Module):
 
 class MeasurementPipeline(nn.Module):
     """
-    A unified pipeline chaining an ephemeris propagator directly into a Doppler measurement.
+    A unified pipeline chaining an ephemeris propagator directly into any measurement model.
     """
     def __init__(self, propagator: nn.Module, measurement_model: nn.Module):
         super().__init__()
@@ -47,22 +47,19 @@ class MeasurementPipeline(nn.Module):
         self,
         x: torch.Tensor,
         tsince: torch.Tensor,
-        st_pos: torch.Tensor,
-        st_vel: torch.Tensor,
-        center_freq: torch.Tensor,
+        **kwargs
     ) -> torch.Tensor:
         
         # 1. Source (Get coordinates)
         sat_pos, sat_vel = self.propagator(x, tsince)
         
         # 2. Sink (Measure)
+        # Pass the state, ephemeris, and any measurement-specific arguments
         return self.measurement_model(
             x=x, 
             sat_pos=sat_pos, 
             sat_vel=sat_vel, 
-            st_pos=st_pos, 
-            st_vel=st_vel, 
-            center_freq=center_freq
+            **kwargs
         )
 
 class DopplerMeasurement(nn.Module):
