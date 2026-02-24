@@ -1,22 +1,14 @@
-from doctest import DocTestParser
-import re
-from string import whitespace
 import time
 import dsgp4
 import numpy as np
-from requests import get
 import torch
 import polars as pl
 import matplotlib.pyplot as plt
-import pandas as pd
-
 from dsgp4.tle import TLE
-from torch.utils.show_pickle import FakeClass
 import diffod.state as state
 from diffod.functional.system import PredictDoppler
-from diffod.utils import load_gmat_csv_block, get_tle_epoch
+from diffod.utils import load_gmat_csv_block
 from diffod.gse import station_teme_preprocessor
-
 # Swapped out CCA for the WGN solver
 from diffod.solvers.gaussNewton import wgn_solve
 from diffod.solvers.newton import newton_solve
@@ -57,14 +49,16 @@ Sat.TEME_Earth.VY
 Sat.TEME_Earth.VZ
 """
 
-times_unix = torch.tensor(period_telemetry["timestamp"].to_numpy(), dtype=torch.float64, device=target_device)
-doppler_obs = torch.tensor(period_telemetry["Doppler_Hz"].to_numpy(), dtype=torch.float64, device=target_device)
-contacts = torch.tensor(period_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=target_device)
+N_skip = 1000
+
+times_unix = torch.tensor(period_telemetry["timestamp"].to_numpy(), dtype=torch.float64, device=target_device)#[N_skip:-N_skip]
+doppler_obs = torch.tensor(period_telemetry["Doppler_Hz"].to_numpy(), dtype=torch.float64, device=target_device)#[N_skip:-N_skip]
+contacts = torch.tensor(period_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=target_device)#[N_skip:-N_skip]
 
 N_samples = len(times_unix)
 t_obs = (times_unix - epoch) #/ 60.0
 
-st_indices = torch.zeros(N_samples, dtype=torch.int32, device=target_device)
+st_indices = torch.zeros(N_samples, dtype=torch.int32, device=target_device)#[N_skip]
 
 print("Preprocessing Astropy arrays on CPU...")
 station_pos_cpu, station_vel_cpu = station_teme_preprocessor(
@@ -81,7 +75,7 @@ st_vel = station_vel_cpu.to(device=target_device)
 # ---------------------------------------------------------
 # 2. Define State Vector & Functional Forward
 # ---------------------------------------------------------
-state_def = state.StateDefinition(
+state_def = state.SSV(
     init_tle=init_tle,
     num_measurements=N_samples,
     fit_ma=True,
@@ -231,21 +225,9 @@ plt.ylabel('Doppler Shift (Hz)', fontsize=12)
 plt.legend(loc='upper right', fontsize=11)
 plt.grid(True, linestyle=':', alpha=0.7)
 plt.tight_layout()
-plt.close()
+plt.show()
 
 tle = state_def.export(results["Gauss-Newton (WGN)"]["x"])
-
-print(tle)
-
-# t_gps, gps_pos, gps_vel = load_gmat_csv_block(
-#     file_path="data/gps_data.csv",
-#     tle_epoch_unix = get_tle_epoch(tle),
-#     block_sec=24*60*60,
-# )
-
-import torch
-import matplotlib.pyplot as plt
-import dsgp4 # Assuming this is the module for propagation
 
 def compute_ric_residuals(
     tle, 
@@ -360,13 +342,13 @@ def plot_ric_residuals(
 t_gps, r_gps, v_gps = load_gmat_csv_block(
     file_path="data/gps_data.csv",
     tle_epoch_unix=epoch,
-    block_sec=24*60*60,
+    block_sec=60*60,
 )
 
 # 2. Compute Initial Residuals
 t_mins, pos_ric_init, vel_ric_init = compute_ric_residuals(
     tle=init_tle, 
-    t_gps=t_gps, 
+    t_gps=t_gps-37, 
     r_gps=r_gps, 
     v_gps=v_gps, 
     tle_epoch_unix=epoch

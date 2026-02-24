@@ -5,7 +5,14 @@ from diffod.functional.tle import update
 from diffod.utils import BiasGroup 
 import dsgp4
 
-class StateDefinition:
+"""
+Smart state vector
+"""
+
+class SSV:
+    """
+    Docstring for Smart-State-Vector
+    """
     def __init__(
         self,
         init_tle: TLE,
@@ -19,7 +26,7 @@ class StateDefinition:
         fit_bstar: bool = False,
         fit_ndot: bool = False,
         fit_nddot: bool = False,
-    ):
+    ) -> None:
         self.init_tle = init_tle
         self.num_measurements = num_measurements
         
@@ -59,17 +66,24 @@ class StateDefinition:
             "nddot": ("nddot", "_nddot"),
         }
 
-    def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-        x0 = torch.zeros(
-            self.current_dim, dtype=torch.float32, requires_grad=True, device=device
-        )
+        self.aux_params: dict[str, float] = {}
+        self.aux_param_indices: dict[str, int] = {}
 
-        with torch.no_grad():
-            for name, idx in self.map_param_to_idx.items():
-                _, tle_attr = self._func_arg_map[name]
-                x0[idx] = getattr(self.init_tle, tle_attr, 0.0)
-                
-        return x0
+    def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+            x0 = torch.zeros(
+                self.current_dim, dtype=torch.float32, requires_grad=True, device=device
+            )
+
+            with torch.no_grad():
+                for name, idx in self.map_param_to_idx.items():
+                    _, tle_attr = self._func_arg_map[name]
+                    x0[idx] = getattr(self.init_tle, tle_attr, 0.0)
+                    
+                # Populate auxiliary parameters
+                for key, idx in self.aux_param_indices.items():
+                    x0[idx] = self.aux_params[key]
+                    
+            return x0
 
     def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:
         """
@@ -107,21 +121,21 @@ class StateDefinition:
         raise ValueError(f"Bias group '{name}' not found.")
 
     def get_active_map(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-        """
-        Generates a boolean selection vector for Normal Equation solving.
-        True -> Parameter is Active (columns to select from the Jacobian).
-        """
         active_map = torch.zeros(self.current_dim, dtype=torch.bool, device=device)
         
-        # 1. Flag core orbital parameters based on initialization arguments
+        # 1. Flag core orbital parameters
         for name, idx in self.map_param_to_idx.items():
             active_map[idx] = self.active_flags[name]
             
-        # 2. Bias parameters are dynamically added and assumed active
+        # 2. Bias parameters
         for bg in self.bias_groups.values():
             start = bg.global_offset
             end = start + bg.num_params
             active_map[start:end] = True
+            
+        # 3. Auxiliary parameters are dynamic and assumed active
+        for idx in self.aux_param_indices.values():
+            active_map[idx] = True
             
         return active_map
 
@@ -148,3 +162,27 @@ class StateDefinition:
         assert isinstance(sat_obj, dsgp4.TLE)
 
         return sat_obj
+
+    def add_parameter(self, key: str, value: float) -> None:
+        """
+        Adds an auxiliary parameter (e.g., time offset) to the state vector.
+        
+        :param key: Unique string identifier for the parameter
+        :param value: Initial float value for the parameter
+        """
+        if key in self.aux_param_indices:
+            raise ValueError(f"Auxiliary parameter '{key}' already exists.")
+            
+        self.aux_params[key] = value
+        self.aux_param_indices[key] = self.current_dim
+        self.current_dim += 1
+
+    def get_aux_parameter(self, x_state: torch.Tensor, key: str) -> torch.Tensor:
+        """
+        Extracts the scalar tensor for an auxiliary parameter, preserving gradients.
+        """
+        if key not in self.aux_param_indices:
+            raise KeyError(f"Auxiliary parameter '{key}' not found in state definition.")
+        
+        # Slicing keeps it as a scalar tensor for Autograd
+        return x_state[self.aux_param_indices[key]]

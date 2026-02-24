@@ -75,4 +75,4 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     gps_pos = torch.from_numpy(np.copy(gps_pos_np))
     gps_vel = torch.from_numpy(np.copy(gps_vel_np))
     
-    return t_gps, gps_pos, gps_vel
+    return t_gps+37.0, gps_pos, gps_vel
