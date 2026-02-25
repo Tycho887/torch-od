@@ -32,7 +32,7 @@ print("Loading GPS Data...")
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
     file_path="data/gps_data.csv",
     tle_epoch_unix=epoch,
-    block_sec=60*60*1, # 1 hour block
+    block_sec=60*60*24, # 1 hour block
 )
 
 r_gps_raw /= 1e3
@@ -209,13 +209,30 @@ def compute_ric_residuals(
 
     return t_since_mins, pos_ric, vel_ric
 
-def print_ric_residual_summary(t_mins: torch.Tensor, 
-    results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
-):
-    t_plot = t_mins.detach().cpu().numpy()
+def print_ric_residual_summary(results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]]):
+    """
+    Prints a formatted summary of RMS errors in the RIC frame for each solver result.
+    """
     components = ['Radial', 'Along-track', 'Cross-track']
-    
+    header = f"{'Solver Name':<25} | {'Axis':<12} | {'Pos RMS (km)':<14} | {'Vel RMS (km/s)':<14}"
+    divider = "-" * len(header)
 
+    print("\n" + divider)
+    print(header)
+    print(divider)
+
+    for name, (pos_ric, vel_ric) in results_dict.items():
+        # Calculate RMS: sqrt(mean(x^2))
+        pos_rms = torch.sqrt(torch.mean(pos_ric**2, dim=0))
+        vel_rms = torch.sqrt(torch.mean(vel_ric**2, dim=0))
+
+        for i, comp in enumerate(components):
+            # Only print the name on the first row of each solver block for readability
+            row_name = name if i == 0 else ""
+            print(f"{row_name:<25} | {comp:<12} | {pos_rms[i]:<14.6f} | {vel_rms[i]:<14.6f}")
+        print(divider)
+
+# Usage in your script:
 def plot_ric_residuals(
     t_mins: torch.Tensor, 
     results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
@@ -285,4 +302,5 @@ for name, res in results.items():
     )
     ric_results[name] = (pos_ric_opt, vel_ric_opt)
 
+print_ric_residual_summary(ric_results)
 plot_ric_residuals(t_mins, ric_results)
