@@ -76,3 +76,77 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     gps_vel = torch.from_numpy(np.copy(gps_vel_np))
     
     return t_gps+37.0, gps_pos, gps_vel
+
+def transform_tle_to_mee(
+    n: torch.Tensor, 
+    e: torch.Tensor, 
+    i: torch.Tensor, 
+    omega: torch.Tensor, 
+    raan: torch.Tensor, 
+    m: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """
+    Transforms standard SGP4 Keplerian elements to Modified Equinoctial Elements.
+    """
+    # 1. Eccentricity components
+    omega_plus_raan = omega + raan
+    f = e * torch.cos(omega_plus_raan)
+    g = e * torch.sin(omega_plus_raan)
+    
+    # 2. Inclination components (Note: tan(i/2) becomes singular exactly at i = 180 deg)
+    tan_half_i = torch.tan(i / 2.0)
+    h = tan_half_i * torch.cos(raan)
+    k = tan_half_i * torch.sin(raan)
+    
+    # 3. Mean Longitude
+    L = raan + omega + m
+    L = torch.fmod(L, 2.0 * np.pi)
+    L = torch.where(L < 0, L + 2.0 * np.pi, L)
+    
+    return {
+        "n": n,
+        "f": f,
+        "g": g,
+        "h": h,
+        "k": k,
+        "L": L
+    }
+
+def transform_mee_to_tle(
+    n: torch.Tensor, 
+    f: torch.Tensor, 
+    g: torch.Tensor, 
+    h: torch.Tensor, 
+    k: torch.Tensor, 
+    L: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """
+    Transforms Modified Equinoctial Elements back to standard SGP4 Keplerian elements.
+    """
+    twopi = 2.0 * np.pi
+    
+    ecco = torch.sqrt(f**2 + g**2)
+    inclo = 2.0 * torch.atan(torch.sqrt(h**2 + k**2))
+    
+    nodeo = torch.atan2(k, h)
+    argp_plus_raan = torch.atan2(g, f)
+    argpo = argp_plus_raan - nodeo
+    mo = L - argp_plus_raan
+    
+    # Modulo arithmetic to keep angles strictly in [0, 2pi]
+    nodeo = torch.fmod(nodeo, twopi)
+    argpo = torch.fmod(argpo, twopi)
+    mo = torch.fmod(mo, twopi)
+    
+    nodeo = torch.where(nodeo < 0, nodeo + twopi, nodeo)
+    argpo = torch.where(argpo < 0, argpo + twopi, argpo)
+    mo = torch.where(mo < 0, mo + twopi, mo)
+    
+    return {
+        "no_kozai": n,
+        "ecco": ecco,
+        "inclo": inclo,
+        "nodeo": nodeo,
+        "argpo": argpo,
+        "mo": mo
+    }

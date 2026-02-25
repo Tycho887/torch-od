@@ -2,48 +2,43 @@ import torch
 from torch.func import jacfwd
 from collections.abc import Callable
 
-def solve_gn_step(
+def solve_gn_step_svd(
     J: torch.Tensor, 
     y_model: torch.Tensor, 
     y_obs: torch.Tensor, 
     sqrt_w: float = 1.0,
-    lambda_damp: float = 1e-3  # Introduce damping parameter
+    rcond: float = 1e-2  # Cutoff for collinear singular values
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Levenberg-Marquardt step with column normalization.
+    Direct SVD-based least squares solver to handle severe collinearity.
     """
     r = y_obs - y_model
-    print(f"RMSE: {torch.sqrt(torch.mean(r**2)).detach().item():.6f}")
+    print(f"RMSE: {torch.sqrt(input=torch.mean(input=r**2)).detach().item():.6f}")
     
     Jw = J * sqrt_w
     rw = r * sqrt_w
     
+    # Column normalization for scaling parity
     col_norms = torch.norm(Jw, dim=0) + 1e-10
     Jn = Jw / col_norms
     
-    Hn = Jn.T @ Jn
-    bn = Jn.T @ rw
-
-    # Add Levenberg-Marquardt damping to the diagonal
-    # This guarantees the matrix is invertible and limits the step size
-    Identity = torch.eye(Hn.shape[0], dtype=Hn.dtype, device=Hn.device)
-    Hn_damped = Hn + lambda_damp * Identity
-
-    print(f"Hessian: {Hn_damped}")
-    print(f"Cond (Damped): {torch.linalg.cond(Hn_damped):.2f}")
+    # Solve Jn * dx_tilde = rw directly using SVD
+    # rcond zeroes out singular values that cause the instability
+    dx_tilde = torch.linalg.lstsq(Jn, rw, rcond=rcond).solution
     
-    dx_tilde = torch.linalg.solve(Hn_damped, bn)
     dx = dx_tilde / col_norms
 
     print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
     
-    # Covariance estimate remains based on the undamped Hessian
-    # Add a tiny eps to diagonal if strictly needed for inversion
-    P_cov = torch.linalg.pinv(Hn) / (col_norms[:, None] @ col_norms[None, :])
+    # Covariance estimate via pseudoinverse of the Jacobian
+    # P = (J^T J)^-1  => P = V (Sigma^-2) V^T
+    # This is safer than inverting Hn directly
+    Jn_pinv = torch.linalg.pinv(Jn, rcond=rcond)
+    P_cov = (Jn_pinv @ Jn_pinv.T) / (col_norms[:, None] @ col_norms[None, :])
     
     return dx, P_cov
 
-def wgn_solve(
+def svd_solve(
     x_init: torch.Tensor,
     y_obs_fixed: torch.Tensor,
     forward_fn: Callable[[torch.Tensor], torch.Tensor],
@@ -72,7 +67,7 @@ def wgn_solve(
         J_masked = J_full[:, estimate_mask]
         
         # 3. Solve Normal Equations
-        dx, P_cov = solve_gn_step(J_masked, y_model, y_obs_fixed, sqrt_w)
+        dx, P_cov = solve_gn_step_svd(J_masked, y_model, y_obs_fixed, sqrt_w)
         
         # 4. Apply update to the masked indices
         x[estimate_mask] = x[estimate_mask] + dx

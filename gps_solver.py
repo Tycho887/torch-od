@@ -14,6 +14,7 @@ from diffod.solvers.gaussNewton import wgn_solve
 from diffod.solvers.newton import newton_solve
 from diffod.solvers.cca import cca_solve
 from diffod.solvers.lbfgs import lbfgs_solve
+from diffod.solvers.gn_svd import svd_solve
 
 # ---------------------------------------------------------
 # 1. Setup Data & Boundary
@@ -51,7 +52,7 @@ t_since_mins = (t_gps - epoch) / 60.0
 # ---------------------------------------------------------
 # 2. Define State Vector & Functional Forward
 # ---------------------------------------------------------
-ssv = state.SSV(
+ssv = state.TLE_SSV(
     init_tle=init_tle,
     num_measurements=N_samples,
     fit_ma=True,
@@ -115,7 +116,8 @@ results = {}
 
 solvers = {
     # "Gauss-Newton (WGN)": wgn_solve,
-    "L-BFGS": lbfgs_solve,
+    # "L-BFGS": lbfgs_solve,
+    "GN-SVD": svd_solve,
     # "Consider Covariance (CCA)": cca_solve,
 }
 
@@ -129,7 +131,7 @@ with torch.no_grad():
             "forward_fn": functional_forward,
             "sigma_obs": sigma_obs,
             "estimate_mask": active_map,
-            "num_steps": 5,
+            "num_steps": 3,
         }
         
         if name == "Consider Covariance (CCA)":
