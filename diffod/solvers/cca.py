@@ -49,7 +49,7 @@ def compute_cca_step(
     # Solve for the state update (dx)
     dx = torch.cholesky_solve(N_x.unsqueeze(-1), L).squeeze(-1)
 
-    print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
+    # print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
 
 
     # 4. Consider Covariance Step

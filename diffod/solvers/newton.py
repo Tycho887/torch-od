@@ -20,7 +20,7 @@ def solve_newton_step(
     H_scaled = D_inv[:, None] * H * D_inv[None, :]
     g_scaled = D_inv * g
     
-    print(f"cond: {torch.linalg.cond(H):.2e}")
+    # print(f"cond: {torch.linalg.cond(H):.2e}")
     
     # Solve the well-conditioned system: H_scaled * dx_scaled = -g_scaled
     dx_scaled = torch.linalg.solve(H, -g)
@@ -57,10 +57,10 @@ def newton_solve(
     def objective_fn(x_state: torch.Tensor) -> torch.Tensor:
         y_model = forward_fn(x_state)
         r = y_obs_fixed - y_model
-        print(r)
+        # print(r)
         # rw = r * sqrt_w
         loss = 0.5 * torch.sum(input=r ** 2)
-        print(loss)
+        # print(loss)
         return loss
         # return 0.5 * torch.sum(input=rw ** 2)
 
@@ -81,7 +81,7 @@ def newton_solve(
         x[estimate_mask] = x[estimate_mask] + dx
         
         print(f"Step {step+1} | Update Norm: {torch.linalg.norm(dx):.6e}")
-        print(f"State: {x}")
+        # print(f"State: {x}")
 
         final_P = P_cov 
 

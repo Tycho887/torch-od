@@ -26,9 +26,9 @@ def solve_gn_step(
     Hn = Jn.T @ Jn
     bn = Jn.T @ rw
 
-    print(Hn)
+    # print(Hn)
 
-    print(f"cond: {torch.linalg.cond(Hn)}")
+    # print(f"cond: {torch.linalg.cond(Hn)}")
     
     # Solve for update
     dx_tilde = torch.linalg.solve(Hn, bn)
@@ -76,8 +76,8 @@ def wgn_solve(
         # 4. Apply update to the masked indices
         x[estimate_mask] = x[estimate_mask] + dx
         
-        print(torch.linalg.norm(dx), len(dx))
-        print(x)
+        # print(torch.linalg.norm(dx), len(dx))
+        # print(x)
 
         # Keep track of the last covariance for the estimated block
         final_P = P_cov 

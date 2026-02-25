@@ -55,7 +55,7 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     df['dt'] = pd.to_datetime(time_str, format='%d %b %Y %H:%M:%S.%f')
     df['unix'] = df['dt'].astype('int64') // 10**6  # Seconds
     
-    print(f"Minimum: {df['unix'].min()} | Maximum: {df['unix'].max()}")
+    # print(f"Minimum: {df['unix'].min()} | Maximum: {df['unix'].max()}")
 
     # Filter by time window (centered or trailing, usually trailing for block_sec)
     mask = (df['unix'] >= tle_epoch_unix) & (df['unix'] <= tle_epoch_unix + block_sec)

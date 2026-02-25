@@ -38,9 +38,6 @@ t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
 r_gps_raw /= 1e3
 v_gps_raw /= 1e3
 
-print(r_gps_raw)
-print(v_gps_raw)
-
 
 # Apply leap second offset for SGP4 propagation
 t_gps = t_gps_raw.to(target_device) #- 37.0
@@ -59,14 +56,14 @@ ssv = state.SSV(
     fit_ma=True,
     fit_mean_motion=True,
     fit_argp=True,
-    fit_bstar=True,
+    fit_bstar=False,
     fit_inclination=True,
     fit_eccentricity=True,
     fit_raan=True,
 )
 
 # --- CARTESIAN MODULAR PIPELINE ---
-propagator = system.SGP4(ssv=ssv, use_pretrained_model=False)
+propagator = system.SGP4(ssv=ssv, use_pretrained_model=True)
 measurement_model = system.CartesianMeasurement(ssv=ssv)
 
 # Assuming you named the wrapper PropagatedCartesian
@@ -77,8 +74,6 @@ model = system.MeasurementPipeline(
 
 # Format the ground truth GPS data into the 1D (6N,) observation vector
 gps_obs_1d = measurement_model.format_gps_observations(r_gps=r_gps, v_gps=v_gps)
-
-print(r_gps)
 
 def functional_forward(x) -> torch.Tensor:
     # No station pos/vel or center_freq needed for Cartesian

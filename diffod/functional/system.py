@@ -12,6 +12,8 @@ class SGP4(nn.Module):
     def __init__(
         self,
         ssv,
+        dtype=torch.float64, # High precision standard for orbital mechanics
+        device=torch.device("cpu"),
         use_pretrained_model: bool = False,
         surrogate_weights_path: str = "models/mldsgp4_example_model.pth",
     ) -> None:
@@ -20,10 +22,9 @@ class SGP4(nn.Module):
         self.use_pretrained_model = use_pretrained_model
         
         if self.use_pretrained_model:
-            self.surrogate_model = FunctionalMLdSGP4()
-            self.surrogate_model.load_state_dict(torch.load(surrogate_weights_path))
-            self.surrogate_model.eval()
-            self.surrogate_model.requires_grad_(False)
+            self.surrogate_model = FunctionalMLdSGP4(dtype=dtype, device=device)
+            self.surrogate_model.load_model()
+            # self.surrogate_model.requires_grad_(requires_grad=True)
             self.model = self.surrogate_model
         else:
             self.model = sgp4_propagate
