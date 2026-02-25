@@ -1,9 +1,9 @@
-from typing import Any
+# from typing import Any
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from diffod.functional.sgp4 import sgp4_propagate
-from dsgp4.mldsgp4 import mldsgp4
+# from dsgp4.mldsgp4 import mldsgp4
 
 
 class FunctionalMLdSGP4(nn.Module):

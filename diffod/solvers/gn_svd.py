@@ -7,7 +7,7 @@ def solve_gn_step_svd(
     y_model: torch.Tensor, 
     y_obs: torch.Tensor, 
     sqrt_w: float = 1.0,
-    rcond: float = 1e-2  # Cutoff for collinear singular values
+    rcond: float = 1e-4  # Cutoff for collinear singular values
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Direct SVD-based least squares solver to handle severe collinearity.

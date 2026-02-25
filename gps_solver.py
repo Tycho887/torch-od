@@ -147,8 +147,8 @@ results = {}
 
 solvers = {
     # "Gauss-Newton (WGN)": wgn_solve,
-    "L-BFGS": lbfgs_solve,
-    # "GN-SVD": svd_solve,
+    # "L-BFGS": lbfgs_solve,
+    "GN-SVD": svd_solve,
     # "Consider Covariance (CCA)": cca_solve,
 }
 
@@ -194,28 +194,30 @@ for name, res in results.items():
 # ---------------------------------------------------------
 print("\nGenerating RIC Residual Plots...")
 
-
-
-# Calculate initial residuals
+# Calculate initial residuals using the initial tensor state
 t_mins, pos_ric_init, vel_ric_init = compute_ric_residuals(
-    tle=init_tle, 
+    x_state=x_in,
+    propagator=propagator, 
     t_gps=t_gps_raw, 
     r_gps=r_gps_raw, 
     v_gps=v_gps_raw, 
     tle_epoch_unix=epoch
 )
 
-ric_results = {"Initial TLE": (pos_ric_init, vel_ric_init)}
+ric_results = {"Initial State": (pos_ric_init, vel_ric_init)}
 
-print(f"Initial TLE: {init_tle}")
+print(f"Initial TLE:\n{init_tle}\n")
 
 # Calculate residuals for each optimized state
 for name, res in results.items():
+    # Keep the export for human-readable logging
     opt_tle = ssv.export(res["x"])
-    new = dsgp4.propagate(tle=opt_tle, tsinces=0, initialized=False)
-    print(f"Optimized TLE: {opt_tle}")
+    print(f"Optimized TLE ({name}):\n{opt_tle}\n")
+    
+    # Compute residuals precisely with the PyTorch model
     _, pos_ric_opt, vel_ric_opt = compute_ric_residuals(
-        tle=opt_tle, 
+        x_state=res["x"],
+        propagator=propagator,
         t_gps=t_gps_raw, 
         r_gps=r_gps_raw, 
         v_gps=v_gps_raw, 

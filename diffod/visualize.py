@@ -2,25 +2,29 @@ import torch
 import matplotlib.pyplot as plt
 import dsgp4
 
+import torch
+import matplotlib.pyplot as plt
+
 def compute_ric_residuals(
-    tle, 
+    x_state: torch.Tensor,
+    propagator: torch.nn.Module,
     t_gps: torch.Tensor, 
     r_gps: torch.Tensor, 
     v_gps: torch.Tensor, 
     tle_epoch_unix: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    
     # 1. Convert GPS inputs from meters back to kilometers for SGP4 math
-    r_gps_km = r_gps.to(torch.float64) #/ 1000.0
-    v_gps_km = v_gps.to(torch.float64) #/ 1000.0
+    r_gps_km = r_gps.to(torch.float64) 
+    v_gps_km = v_gps.to(torch.float64) 
     t_gps = t_gps.to(torch.float64)
 
-    # 2. Propagate TLE to GPS timestamps
+    # 2. Propagate state using your PyTorch functional/ML block
     t_since_mins = (t_gps - tle_epoch_unix) / 60.0
     
-    # dsgp4 returns shape (N, 2, 3) where [:, 0] is pos, [:, 1] is vel
-    r_tot = dsgp4.propagate(tle=tle, tsinces=t_since_mins, initialized=False)
-    r_calc_km = r_tot[:, 0]
-    v_calc_km = r_tot[:, 1]
+    # Bypass dsgp4; use the exact PyTorch graph evaluated by the solver
+    with torch.no_grad():
+        r_calc_km, v_calc_km = propagator(x=x_state, tsince=t_since_mins)
 
     # 3. Calculate Cartesian Errors (Calculated - Truth)
     delta_r = r_calc_km - r_gps_km
