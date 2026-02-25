@@ -13,6 +13,7 @@ from diffod.utils import load_gmat_csv_block
 from diffod.solvers.gaussNewton import wgn_solve
 from diffod.solvers.newton import newton_solve
 from diffod.solvers.cca import cca_solve
+from diffod.solvers.lbfgs import lbfgs_solve
 
 # ---------------------------------------------------------
 # 1. Setup Data & Boundary
@@ -56,14 +57,14 @@ ssv = state.SSV(
     fit_ma=True,
     fit_mean_motion=True,
     fit_argp=True,
-    fit_bstar=False,
+    fit_bstar=True,
     fit_inclination=True,
     fit_eccentricity=True,
     fit_raan=True,
 )
 
 # --- CARTESIAN MODULAR PIPELINE ---
-propagator = system.SGP4(ssv=ssv, use_pretrained_model=True)
+propagator = system.SGP4(ssv=ssv, use_pretrained_model=False)
 measurement_model = system.CartesianMeasurement(ssv=ssv)
 
 # Assuming you named the wrapper PropagatedCartesian
@@ -113,8 +114,8 @@ print("\nExecuting OD Solvers...")
 results = {}
 
 solvers = {
-    "Gauss-Newton (WGN)": wgn_solve,
-    # "Exact Newton": newton_solve,
+    # "Gauss-Newton (WGN)": wgn_solve,
+    "L-BFGS": lbfgs_solve,
     # "Consider Covariance (CCA)": cca_solve,
 }
 

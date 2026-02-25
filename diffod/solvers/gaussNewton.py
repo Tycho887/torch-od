@@ -6,39 +6,40 @@ def solve_gn_step(
     J: torch.Tensor, 
     y_model: torch.Tensor, 
     y_obs: torch.Tensor, 
-    sqrt_w: float = 1.0
+    sqrt_w: float = 1.0,
+    lambda_damp: float = 1e-3  # Introduce damping parameter
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Standard Gauss-Newton step using Normal Equations with column normalization.
+    Levenberg-Marquardt step with column normalization.
     """
-    # Calculate residuals
     r = y_obs - y_model
+    print(f"RMSE: {torch.sqrt(torch.mean(r**2)).detach().item():.6f}")
     
-    # Apply weights (sqrt_w is 1/sigma)
     Jw = J * sqrt_w
     rw = r * sqrt_w
     
-    # Column normalization for numerical stability
     col_norms = torch.norm(Jw, dim=0) + 1e-10
     Jn = Jw / col_norms
     
-    # Form Normal Equations: (Jn^T @ Jn) @ dx_tilde = Jn^T @ rw
     Hn = Jn.T @ Jn
     bn = Jn.T @ rw
 
-    # print(Hn)
+    # Add Levenberg-Marquardt damping to the diagonal
+    # This guarantees the matrix is invertible and limits the step size
+    Identity = torch.eye(Hn.shape[0], dtype=Hn.dtype, device=Hn.device)
+    Hn_damped = Hn + lambda_damp * Identity
 
-    # print(f"cond: {torch.linalg.cond(Hn)}")
+    print(f"Cond (Damped): {torch.linalg.cond(Hn_damped):.2f}")
+    print(f"Eigenvals: {torch.linalg.eigvals(Hn_damped)}")
     
-    # Solve for update
-    dx_tilde = torch.linalg.solve(Hn, bn)
+    dx_tilde = torch.linalg.solve(Hn_damped, bn)
     dx = dx_tilde / col_norms
 
     print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
     
-    # Covariance estimate: (J^T W J)^-1
-    # We use the normalized Hn to compute the inverse safely
-    P_cov = torch.linalg.inv(Hn) / (col_norms[:, None] @ col_norms[None, :])
+    # Covariance estimate remains based on the undamped Hessian
+    # Add a tiny eps to diagonal if strictly needed for inversion
+    P_cov = torch.linalg.pinv(Hn) / (col_norms[:, None] @ col_norms[None, :])
     
     return dx, P_cov
 

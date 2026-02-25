@@ -20,91 +20,89 @@ class FunctionalMLdSGP4(nn.Module):
         super().__init__()
         
         # 1. Device and Dtype Initialization
-        factory_kwargs = {'device': device, 'dtype': dtype}
+
+        self.dtype = dtype
+        self.device = device
         
-        self.fc1 = nn.Linear(in_features=6, out_features=hidden_size, **factory_kwargs)
-        self.fc2 = nn.Linear(in_features=hidden_size, out_features=hidden_size, **factory_kwargs)
-        self.fc3 = nn.Linear(in_features=hidden_size, out_features=6, **factory_kwargs)
-        self.fc4 = nn.Linear(in_features=6, out_features=hidden_size, **factory_kwargs)
-        self.fc5 = nn.Linear(in_features=hidden_size, out_features=hidden_size, **factory_kwargs)
-        self.fc6 = nn.Linear(in_features=hidden_size, out_features=6, **factory_kwargs)
+        self.fc1 = nn.Linear(in_features=6, out_features=hidden_size, dtype=dtype, device=device)
+        self.fc2 = nn.Linear(in_features=hidden_size, out_features=hidden_size, dtype=dtype, device=device)
+        self.fc3 = nn.Linear(in_features=hidden_size, out_features=6, dtype=dtype, device=device)
+        self.fc4 = nn.Linear(in_features=6, out_features=hidden_size, dtype=dtype, device=device)
+        self.fc5 = nn.Linear(in_features=hidden_size, out_features=hidden_size, dtype=dtype, device=device)
+        self.fc6 = nn.Linear(in_features=hidden_size, out_features=6, dtype=dtype, device=device)
 
         self.tanh = nn.Tanh()
         self.leaky_relu = nn.LeakyReLU(negative_slope=0.01)
         self.normalization_R = normalization_R
         self.normalization_V = normalization_V
         
-        self.input_correction = Parameter(data=torch.full(size=(6,), fill_value=input_correction, **factory_kwargs))
-        self.output_correction = Parameter(data=torch.full(size=(6,), fill_value=output_correction, **factory_kwargs))
+        self.input_correction = Parameter(data=torch.full(size=(6,), fill_value=input_correction, dtype=dtype, device=device))
+        self.output_correction = Parameter(data=torch.full(size=(6,), fill_value=output_correction, dtype=dtype, device=device))
 
     def forward(
         self,
         tsince: torch.Tensor,
-        **sgp4_kwargs,
+        bstar: torch.Tensor,
+        ndot: torch.Tensor,
+        nddot: torch.Tensor,
+        ecco: torch.Tensor,
+        argpo: torch.Tensor,
+        inclo: torch.Tensor,
+        mo: torch.Tensor,
+        no_kozai: torch.Tensor,
+        nodeo: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass using a purely functional SGP4 propagator.
         """
-        # 2. Dynamic Memory Placement
-        # Read the current device in case the model was moved via .to(device)
-        current_device = self.input_correction.device
-        current_dtype = self.input_correction.dtype
+        # 1. Explicitly cast all inputs to the correct device and dtype
+        tsince = tsince.to(device=self.device, dtype=self.dtype)
+        bstar = bstar.to(device=self.device, dtype=self.dtype)
+        ndot = ndot.to(device=self.device, dtype=self.dtype)
+        nddot = nddot.to(device=self.device, dtype=self.dtype)
+        ecco = ecco.to(device=self.device, dtype=self.dtype)
+        argpo = argpo.to(device=self.device, dtype=self.dtype)
+        inclo = inclo.to(device=self.device, dtype=self.dtype)
+        mo = mo.to(device=self.device, dtype=self.dtype)
+        no_kozai = no_kozai.to(device=self.device, dtype=self.dtype)
+        nodeo = nodeo.to(device=self.device, dtype=self.dtype)
 
-        # Ensure inputs match BOTH device and precision
-        tsince = tsince.to(device=current_device, dtype=current_dtype)
-        sgp4_kwargs = {
-            k: v.to(device=current_device, dtype=current_dtype) if isinstance(v, torch.Tensor) else v 
-            for k, v in sgp4_kwargs.items()
-        }
+        # 2. Stack the 6 parameters targeted for neural network correction
+        # Using dim=-1 ensures it works for both batched (N, 6) and unbatched (6,) inputs
+        x0 = torch.stack((ecco, argpo, inclo, mo, no_kozai, nodeo), dim=-1)
 
-        # Stack parameters
-        x0 = torch.stack(
-            (
-                sgp4_kwargs["ecco"],
-                sgp4_kwargs["argpo"],
-                sgp4_kwargs["inclo"],
-                sgp4_kwargs["mo"],
-                sgp4_kwargs["no_kozai"],
-                sgp4_kwargs["nodeo"],
-            ),
-            dim=-1,
-        )
-
+        # 3. Compute Input Corrections
         x = self.leaky_relu(self.fc1(x0))
         x = self.leaky_relu(self.fc2(x))
-        # nn_correction = self.tanh(self.fc3(x))
-            
-        x = x0 * (1+self.input_correction*self.tanh(self.fc3(x)))
+        x_corrected = x0 * (1 + self.input_correction * self.tanh(self.fc3(x)))
 
-        # Update kwargs purely functionally
-        updated_kwargs = {k: v for k, v in sgp4_kwargs.items()}
-        updated_kwargs.update(
-            {
-                "ecco": x[0],
-                "argpo": x[1],
-                "inclo": x[2],
-                "mo": x[3],
-                "no_kozai": x[4],
-                "nodeo": x[5],
-            }
+        # 4. Execute functional propagation with *corrected* parameters
+        # Slicing with [..., i] preserves batch dimensions safely
+        pos, vel = sgp4_propagate(
+            tsince=tsince,
+            bstar=bstar,
+            ndot=ndot,
+            nddot=nddot,
+            ecco=x_corrected[0],
+            argpo=x_corrected[1],
+            inclo=x_corrected[2],
+            mo=x_corrected[3],
+            no_kozai=x_corrected[4],
+            nodeo=x_corrected[5]
         )
 
-        # Execute custom functional propagation (Maintained in fp64)
-        pos, vel = sgp4_propagate(tsince=tsince, **updated_kwargs)
-
+        # 5. Compute Output Corrections
         x_out = torch.cat(
             (pos / self.normalization_R, vel / self.normalization_V), dim=-1
         )
 
-        x=self.leaky_relu(self.fc4(x_out))
-        x=self.leaky_relu(self.fc5(x))
-        x=x_out*(1+self.output_correction*self.tanh(self.fc6(x)))
+        x = self.leaky_relu(self.fc4(x_out))
+        x = self.leaky_relu(self.fc5(x))
+        x_final = x_out * (1 + self.output_correction * self.tanh(self.fc6(x)))
 
-        # Denormalize to return physical state vectors
-        pos_corrected = x[:3] * self.normalization_R
-        vel_corrected = x[3:] * self.normalization_V
-
-        # print(pos_corrected, vel_corrected)
+        # 6. Denormalize to return physical state vectors (km, km/s)
+        pos_corrected = x_final[:, :3] * self.normalization_R
+        vel_corrected = x_final[:, 3:] * self.normalization_V
 
         return pos_corrected, vel_corrected
 
@@ -112,17 +110,12 @@ class FunctionalMLdSGP4(nn.Module):
         """
         Loads weights and ensures they match the model's precision.
         """
-        current_device = self.input_correction.device
-        current_dtype = self.input_correction.dtype # Detect if we are FP64
-        
         # Load the state dict
-        state_dict = torch.load(path, map_location=current_device, weights_only=True)
+        state_dict = torch.load(path, map_location=self.device)
         
         # Manually cast every tensor in the state_dict to the target dtype
         for key in state_dict:
-            state_dict[key] = state_dict[key].to(dtype=current_dtype)
-        
-        print(state_dict)
-
+            state_dict[key] = state_dict[key].to(dtype=self.dtype)
+            print(state_dict[key].type())
         self.load_state_dict(state_dict)
         self.eval()
