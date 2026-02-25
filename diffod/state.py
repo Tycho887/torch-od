@@ -165,12 +165,12 @@ class MEE_SSV(BaseSSV):
         
         with torch.no_grad():
             # 1. Cast TLE floats to tensors for the transformation block
-            n = torch.tensor(self.init_tle.no_kozai, device=device)
-            e = torch.tensor(self.init_tle.ecco, device=device)
-            i = torch.tensor(self.init_tle.inclo, device=device)
-            omega = torch.tensor(self.init_tle.argpo, device=device)
-            raan = torch.tensor(self.init_tle.nodeo, device=device)
-            m = torch.tensor(self.init_tle.mo, device=device)
+            n = torch.tensor(self.init_tle._no_kozai, device=device)
+            e = torch.tensor(self.init_tle._ecco, device=device)
+            i = torch.tensor(self.init_tle._inclo, device=device)
+            omega = torch.tensor(self.init_tle._argpo, device=device)
+            raan = torch.tensor(self.init_tle._nodeo, device=device)
+            m = torch.tensor(self.init_tle._mo, device=device)
 
             # 2. Transform
             mee_dict = transform_tle_to_mee(n, e, i, omega, raan, m)
