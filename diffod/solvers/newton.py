@@ -11,7 +11,7 @@ def solve_newton_step(
     Standard Newton step using symmetric preconditioning for numerical stability.
     Solves: H * dx = -g
     """
-    # Symmetric preconditioning (analogous to your Jacobian column normalization)
+    # Symmetric preconditioning (analogous to Jacobian column normalization)
     # D = diag(1 / sqrt(diag(H) + eps))
     d = torch.sqrt(torch.abs(torch.diag(H)) + eps)
     D_inv = 1.0 / d
@@ -20,18 +20,19 @@ def solve_newton_step(
     H_scaled = D_inv[:, None] * H * D_inv[None, :]
     g_scaled = D_inv * g
     
-    print(f"cond: {torch.linalg.cond(H_scaled):.2e}")
+    print(f"cond: {torch.linalg.cond(H):.2e}")
     
     # Solve the well-conditioned system: H_scaled * dx_scaled = -g_scaled
-    dx_scaled = torch.linalg.solve(H_scaled, -g_scaled)
+    dx_scaled = torch.linalg.solve(H, -g)
     
     # Revert the scaling on the update vector
     dx = D_inv * dx_scaled
     
     # Covariance estimate: H^-1
     # We use the scaled H to compute the inverse safely, then unscale it
-    P_cov = D_inv[:, None] * torch.linalg.inv(H_scaled) * D_inv[None, :]
-    
+    # P_cov = D_inv[:, None] * torch.linalg.inv(H_scaled) * D_inv[None, :]
+    P_cov = torch.linalg.inv(H)
+
     return dx, P_cov
 
 def newton_solve(
@@ -46,7 +47,7 @@ def newton_solve(
     """
     Iterative solver using the exact exact Hessian via PyTorch functional API.
     """
-    x = x_init.detach().clone().to(torch.float64)
+    x = x_init.detach().clone().to(dtype=torch.float64)
     sqrt_w = 1.0 # / sigma_obs
     
     n_total = x.shape[0]
@@ -56,8 +57,12 @@ def newton_solve(
     def objective_fn(x_state: torch.Tensor) -> torch.Tensor:
         y_model = forward_fn(x_state)
         r = y_obs_fixed - y_model
-        rw = r * sqrt_w
-        return 0.5 * torch.sum(rw ** 2)
+        print(r)
+        # rw = r * sqrt_w
+        loss = 0.5 * torch.sum(input=r ** 2)
+        print(loss)
+        return loss
+        # return 0.5 * torch.sum(input=rw ** 2)
 
     for step in range(num_steps):
         # 2. Compute exact exact Gradient and Hessian wrt full state x

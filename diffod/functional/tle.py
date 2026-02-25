@@ -53,31 +53,31 @@ def update(
     # 2. Return a fresh TLE object
     # dSGP4 will store the tensors inside. When you call propagate() on this object,
     # the operations will trace back to x_state.
-    sat_obj = TLE(arguments)
+    return TLE(arguments)
 
     # 3. Differentiable Initialization (Graph Access)
     # We pass the tensors directly into sgp4init.
     # This records the operations (constants calculation) on the graph.
-    whichconst = get_gravity_constants(gravity_constant)
+    # whichconst = get_gravity_constants(gravity_constant)
 
-    sgp4init(
-        whichconst=whichconst,
-        opsmode="i",
-        satn=sat_obj.satellite_catalog_number,
-        epoch=(sat_obj._jdsatepoch + sat_obj._jdsatepochF) - 2433281.5,
-        xbstar=val(key="b_star", default=sat_obj._bstar, map_param_to_idx=map_param_to_idx, x=x),
-        xndot=sat_obj._ndot,
-        xnddot=sat_obj._nddot,
-        xecco=val(key="eccentricity", default=sat_obj._ecco, map_param_to_idx=map_param_to_idx, x=x),
-        xargpo=val(key="argument_of_perigee", default=sat_obj._argpo, map_param_to_idx=map_param_to_idx, x=x),
-        xinclo=val(key="inclination", default=sat_obj._inclo, map_param_to_idx=map_param_to_idx, x=x),
-        xmo=x[0],  # val("mean_anomaly", sat_ob-j._mo, ssv, x),
-        xno_kozai=val(key="mean_motion", default=sat_obj._no_kozai, map_param_to_idx=map_param_to_idx, x=x),
-        xnodeo=val(key="raan", default=sat_obj._nodeo, map_param_to_idx=map_param_to_idx, x=x),
-        satellite=sat_obj,
-    )
+    # sgp4init(
+    #     whichconst=whichconst,
+    #     opsmode="i",
+    #     satn=sat_obj.satellite_catalog_number,
+    #     epoch=(sat_obj._jdsatepoch + sat_obj._jdsatepochF) - 2433281.5,
+    #     xbstar=val(key="b_star", default=sat_obj._bstar, map_param_to_idx=map_param_to_idx, x=x),
+    #     xndot=sat_obj._ndot,
+    #     xnddot=sat_obj._nddot,
+    #     xecco=val(key="eccentricity", default=sat_obj._ecco, map_param_to_idx=map_param_to_idx, x=x),
+    #     xargpo=val(key="argument_of_perigee", default=sat_obj._argpo, map_param_to_idx=map_param_to_idx, x=x),
+    #     xinclo=val(key="inclination", default=sat_obj._inclo, map_param_to_idx=map_param_to_idx, x=x),
+    #     xmo=x[0],  # val("mean_anomaly", sat_ob-j._mo, ssv, x),
+    #     xno_kozai=val(key="mean_motion", default=sat_obj._no_kozai, map_param_to_idx=map_param_to_idx, x=x),
+    #     xnodeo=val(key="raan", default=sat_obj._nodeo, map_param_to_idx=map_param_to_idx, x=x),
+    #     satellite=sat_obj,
+    # )
 
-    return sat_obj
+    # return sat_obj
 
 
 # def dsgp4(

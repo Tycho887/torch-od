@@ -97,6 +97,7 @@ def cca_solve(
     for _ in range(num_steps):
         # 1. Forward Pass & Jacobian (FP64)
         residuals_val = res_fn(x)
+
         H_val = jacfwd(res_fn)(x)
 
         # 2. Compute a priori residual for estimated parameters

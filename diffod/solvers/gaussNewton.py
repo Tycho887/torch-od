@@ -26,11 +26,15 @@ def solve_gn_step(
     Hn = Jn.T @ Jn
     bn = Jn.T @ rw
 
+    print(Hn)
+
     print(f"cond: {torch.linalg.cond(Hn)}")
     
     # Solve for update
     dx_tilde = torch.linalg.solve(Hn, bn)
     dx = dx_tilde / col_norms
+
+    print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
     
     # Covariance estimate: (J^T W J)^-1
     # We use the normalized Hn to compute the inverse safely

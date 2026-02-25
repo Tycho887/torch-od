@@ -1,4 +1,5 @@
 import time
+from astropy.units import F
 import dsgp4
 import numpy as np
 import torch
@@ -31,13 +32,20 @@ print("Loading GPS Data...")
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
     file_path="data/gps_data.csv",
     tle_epoch_unix=epoch,
-    block_sec=60*60, # 1 hour block
+    block_sec=60*60*1, # 1 hour block
 )
 
+r_gps_raw /= 1e3
+v_gps_raw /= 1e3
+
+print(r_gps_raw)
+print(v_gps_raw)
+
+
 # Apply leap second offset for SGP4 propagation
-t_gps = t_gps_raw.to(target_device) - 37.0
-r_gps = r_gps_raw.to(target_device)
-v_gps = v_gps_raw.to(target_device)
+t_gps = t_gps_raw.to(target_device) #- 37.0
+r_gps = r_gps_raw.to(target_device) #/ 1e3
+v_gps = v_gps_raw.to(target_device) #/ 1e3
 
 N_samples = len(t_gps)
 t_since_mins = (t_gps - epoch) / 60.0
@@ -50,15 +58,15 @@ ssv = state.SSV(
     num_measurements=N_samples,
     fit_ma=True,
     fit_mean_motion=True,
-    fit_argp=False,
-    fit_bstar=False,
-    fit_inclination=False,
-    fit_eccentricity=False,
-    fit_raan=False,
+    fit_argp=True,
+    fit_bstar=True,
+    fit_inclination=True,
+    fit_eccentricity=True,
+    fit_raan=True,
 )
 
 # --- CARTESIAN MODULAR PIPELINE ---
-propagator = system.SGP4(ssv=ssv, use_pretrained_model=True)
+propagator = system.SGP4(ssv=ssv, use_pretrained_model=False)
 measurement_model = system.CartesianMeasurement(ssv=ssv)
 
 # Assuming you named the wrapper PropagatedCartesian
@@ -68,7 +76,7 @@ model = system.MeasurementPipeline(
 )
 
 # Format the ground truth GPS data into the 1D (6N,) observation vector
-gps_obs_1d = measurement_model.format_gps_observations(r_gps, v_gps)
+gps_obs_1d = measurement_model.format_gps_observations(r_gps=r_gps, v_gps=v_gps)
 
 print(r_gps)
 
@@ -82,9 +90,9 @@ def functional_forward(x) -> torch.Tensor:
 x_true = ssv.get_initial_state(device=target_device)
 
 N_solves = 1
-x_init_batch = x_true.unsqueeze(0).repeat(N_solves, 1)
-x_init_batch = x_init_batch + x_init_batch * torch.randn_like(x_init_batch) * 1e-4
-x_in = x_init_batch[0].type(torch.float64)
+x_init_batch = x_true.unsqueeze(dim=0).repeat(N_solves, 1)
+x_init_batch = x_init_batch + x_init_batch * torch.randn_like(input=x_init_batch) * 1e-4
+x_in = x_init_batch[0].type(dtype=torch.float64)
 
 # ---------------------------------------------------------
 # 4. WGN Matrix Configurations
@@ -111,8 +119,8 @@ results = {}
 
 solvers = {
     "Gauss-Newton (WGN)": wgn_solve,
-    "Exact Newton": newton_solve,
-    "Consider Covariance (CCA)": cca_solve,
+    # "Exact Newton": newton_solve,
+    # "Consider Covariance (CCA)": cca_solve,
 }
 
 with torch.no_grad():
@@ -165,15 +173,15 @@ def compute_ric_residuals(
     tle_epoch_unix: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # 1. Convert GPS inputs from meters back to kilometers for SGP4 math
-    r_gps_km = r_gps.to(torch.float64) / 1000.0
-    v_gps_km = v_gps.to(torch.float64) / 1000.0
+    r_gps_km = r_gps.to(torch.float64) #/ 1000.0
+    v_gps_km = v_gps.to(torch.float64) #/ 1000.0
     t_gps = t_gps.to(torch.float64)
 
     # 2. Propagate TLE to GPS timestamps
     t_since_mins = (t_gps - tle_epoch_unix) / 60.0
     
     # dsgp4 returns shape (N, 2, 3) where [:, 0] is pos, [:, 1] is vel
-    r_tot = dsgp4.propagate(tle, t_since_mins, initialized=False)
+    r_tot = dsgp4.propagate(tle=tle, tsinces=t_since_mins, initialized=False)
     r_calc_km = r_tot[:, 0]
     v_calc_km = r_tot[:, 1]
 
@@ -200,6 +208,13 @@ def compute_ric_residuals(
     vel_ric = torch.cat([vel_res_R, vel_res_A, vel_res_C], dim=1)
 
     return t_since_mins, pos_ric, vel_ric
+
+def print_ric_residual_summary(t_mins: torch.Tensor, 
+    results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
+):
+    t_plot = t_mins.detach().cpu().numpy()
+    components = ['Radial', 'Along-track', 'Cross-track']
+    
 
 def plot_ric_residuals(
     t_mins: torch.Tensor, 
@@ -243,7 +258,7 @@ def plot_ric_residuals(
 # Calculate initial residuals
 t_mins, pos_ric_init, vel_ric_init = compute_ric_residuals(
     tle=init_tle, 
-    t_gps=t_gps_raw - 37, 
+    t_gps=t_gps_raw, 
     r_gps=r_gps_raw, 
     v_gps=v_gps_raw, 
     tle_epoch_unix=epoch
@@ -251,12 +266,19 @@ t_mins, pos_ric_init, vel_ric_init = compute_ric_residuals(
 
 ric_results = {"Initial TLE": (pos_ric_init, vel_ric_init)}
 
+print(f"Initial TLE: {init_tle}")
+
+prior = dsgp4.propagate(tle=init_tle, tsinces=0, initialized=False)
+
 # Calculate residuals for each optimized state
 for name, res in results.items():
     opt_tle = ssv.export(res["x"])
+    new = dsgp4.propagate(tle=opt_tle, tsinces=0, initialized=False)
+    print(f"Difference is: {new-prior}")
+    print(f"Optimized TLE: {opt_tle}")
     _, pos_ric_opt, vel_ric_opt = compute_ric_residuals(
         tle=opt_tle, 
-        t_gps=t_gps_raw - 37, 
+        t_gps=t_gps_raw, 
         r_gps=r_gps_raw, 
         v_gps=v_gps_raw, 
         tle_epoch_unix=epoch
