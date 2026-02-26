@@ -41,9 +41,9 @@ N_samples = len(times_unix)
 
 # Load Ground Truth GPS
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/gps_data.csv",
+    file_path="data/AWS_long_period.csv",
     tle_epoch_unix=float(torch.mean(times_unix)),
-    block_sec=86400*2,
+    block_sec=86400*1,
 )
 
 # ---------------------------------------------------------

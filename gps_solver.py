@@ -34,7 +34,7 @@ print("Loading GPS Data...")
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
     file_path="data/AWS_long_period.csv",
     tle_epoch_unix=epoch,
-    block_sec=7*86400#43200, # 1 hour block
+    block_sec=5*86400#43200, # 1 hour block
 )
 
 epoch = float(torch.mean(input=t_gps_raw))

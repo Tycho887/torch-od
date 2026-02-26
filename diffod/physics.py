@@ -27,7 +27,7 @@ def compute_doppler(sat_pos, sat_vel, st_pos, st_vel, center_freq) -> torch.Tens
     # Range Rate (Projection of velocity onto LOS)
     range_rate = torch.sum(input=v_rel * u_los, dim=1)
 
-    # print(range_rate)
+    print(dist)
 
     # Doppler Equation: - (range_rate / c) * f
     c_km_s = 299792.458
