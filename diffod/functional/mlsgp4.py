@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from diffod.functional.sgp4 import sgp4_propagate
-# from dsgp4.mldsgp4 import mldsgp4
+from dsgp4.mldsgp4 import mldsgp4
 
 
 class FunctionalMLdSGP4(nn.Module):
@@ -93,7 +93,7 @@ class FunctionalMLdSGP4(nn.Module):
 
         # 5. Compute Output Corrections
         x_out = torch.cat(
-            (pos / self.normalization_R, vel / self.normalization_V), dim=-1
+            (pos / self.normalization_R, vel / self.normalization_V), dim=1
         )
 
         x = self.leaky_relu(self.fc4(x_out))

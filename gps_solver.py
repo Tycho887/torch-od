@@ -96,7 +96,7 @@ ssv = state.MEE_SSV(
 )
 
 # --- CARTESIAN MODULAR PIPELINE ---
-propagator = system.SGP4(ssv=ssv, use_pretrained_model=False)
+propagator = system.SGP4(ssv=ssv, use_pretrained_model=True)
 measurement_model = system.CartesianMeasurement(ssv=ssv)
 
 # Assuming you named the wrapper PropagatedCartesian
