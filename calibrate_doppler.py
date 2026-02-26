@@ -17,9 +17,9 @@ from diffod.visualize import plot_calibrated_doppler
 # ---------------------------------------------------------
 print("Loading Data...")
 epoch = 1762165047
-base_freq = 1.707e9
+base_freq = 1.706e9
 target_device = torch.device("cpu")
-stations = {0: np.array([78.228874, 15.376932, 463])}
+stations = {0: np.array([15.376932, 78.228874, 463])}
 
 
 # Load Doppler Telemetry
@@ -59,7 +59,12 @@ times_unix = times_unix[valid_mask]
 doppler_obs = doppler_obs[valid_mask]
 contacts = contacts[valid_mask]
 t_obs_sec = t_obs_sec[valid_mask]
-st_indices = st_indices[valid_mask] # FIX: Keep station IDs aligned
+st_indices = st_indices[valid_mask] 
+
+# FIX 2: Remap contact indices to be strictly contiguous starting from 0
+# This prevents the state vector from allocating "ghost" parameters for filtered data
+_, remapped_contacts = torch.unique(contacts, return_inverse=True)
+contacts = remapped_contacts.to(torch.int32)
 
 # 1. Calculate the new internal mathematical epoch
 T_mean = t_gps_raw.mean()
@@ -160,10 +165,11 @@ print(f"Calibration finished in {(t1 - t0) * 1000:.2f} ms")
 # ---------------------------------------------------------
 calibrated_params = ssv.export(x_out)
 print("\n--- Calibration Results ---")
-print(f"Time Offset (mins): {calibrated_params['time_offset']:.6e}")
+print(f"Time Offset (seconds): {calibrated_params['time_offset']:.6e}")
 # print(f"Freq Drift (Hz/min): {calibrated_params['freq_drift']:.6e}")
 
 biases = calibrated_params.get("pass_biases", [])
+print(f"Estimated biases: {biases}")
 pass_indices = list(range(len(biases)))
 
 # Plotting the random walk characteristics 
