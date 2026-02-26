@@ -1,8 +1,5 @@
 import torch
-from dsgp4.mldsgp4 import mldsgp4
-
 from diffod.utils import BiasGroup
-
 
 def compute_doppler(sat_pos, sat_vel, st_pos, st_vel, center_freq) -> torch.Tensor:
     """
@@ -16,6 +13,7 @@ def compute_doppler(sat_pos, sat_vel, st_pos, st_vel, center_freq) -> torch.Tens
     Returns:
         (N,) Doppler shift in Hz
     """
+
     # Relative State
     r_rel = sat_pos - st_pos
     v_rel = sat_vel - st_vel
@@ -28,6 +26,8 @@ def compute_doppler(sat_pos, sat_vel, st_pos, st_vel, center_freq) -> torch.Tens
 
     # Range Rate (Projection of velocity onto LOS)
     range_rate = torch.sum(input=v_rel * u_los, dim=1)
+
+    # print(range_rate)
 
     # Doppler Equation: - (range_rate / c) * f
     c_km_s = 299792.458

@@ -3,7 +3,7 @@ import torch.nn as nn
 from diffod.functional.mlsgp4 import FunctionalMLdSGP4
 from diffod.functional.sgp4 import sgp4_propagate
 from diffod.physics import apply_linear_bias, compute_doppler
-
+from diffod.state import CalibrationSSV
 
 class SGP4(nn.Module):
     """
@@ -141,3 +141,57 @@ class CartesianMeasurement(nn.Module):
         vel_flat = v_gps.flatten() / self.normalization_v
         
         return self.stack(pos_flat, vel_flat)
+    
+
+class GPSInterpolator(nn.Module):
+    """
+    Acts as an empirical propagator. Interpolates GPS data at dynamically shifted times.
+    """
+    def __init__(self, ssv: CalibrationSSV, t_gps_ref: torch.Tensor, r_gps_ref: torch.Tensor, v_gps_ref: torch.Tensor):
+        super().__init__()
+        self.ssv = ssv
+        # Ensure reference data is stored as float64 for precision
+        self.t_ref = t_gps_ref.to(torch.float64)
+        self.r_ref = r_gps_ref.to(torch.float64)
+        self.v_ref = v_gps_ref.to(torch.float64)
+
+    def forward(self, x: torch.Tensor, tsince: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # 1. Extract the time offset and shift the evaluation times
+
+
+        args = self.ssv.get_functional_args(x)
+        # print(args["time_offset"])
+        t_eval = tsince + args["time_offset"]
+
+        # 2. Find the bounding indices for interpolation
+        # searchsorted returns the index of the first element >= t_eval
+        idx = torch.searchsorted(sorted_sequence=self.t_ref, input=t_eval)
+        
+        # Clamp to avoid out-of-bounds if time_offset pushes t_eval past the array ends
+        idx = torch.clamp(input=idx, min=1, max=len(self.t_ref) - 1)
+
+        # 3. Gather the bounding points
+        t0 = self.t_ref[idx - 1]
+        t1 = self.t_ref[idx]
+        
+        r0 = self.r_ref[idx - 1]
+        r1 = self.r_ref[idx]
+        
+        v0 = self.v_ref[idx - 1]
+        v1 = self.v_ref[idx]
+
+        # 4. Compute the continuous interpolation weights
+        # weight = (t - t0) / (t1 - t0)
+        weight = (t_eval - t0) / (t1 - t0)
+        weight = weight.unsqueeze(-1) # Shape (N, 1) for broadcasting over (X, Y, Z)
+
+        # print(t0, t1, t_eval)
+        # print(weight)
+
+        # 5. Differentiable Linear Interpolation
+        r_interp = r0 + weight * (r1 - r0)
+        v_interp = v0 + weight * (v1 - v0)
+
+        print(r_interp, v_interp)
+
+        return r_interp, v_interp

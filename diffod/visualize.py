@@ -1,7 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
 import dsgp4
-
+import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
@@ -83,7 +83,7 @@ def plot_ric_residuals(
     components = ['Radial', 'Along-track', 'Cross-track']
     
     styles = {
-        "Initial TLE": {"color": "red", "linestyle": "--", "alpha": 0.7, "linewidth": 2},
+        # "Initial TLE": {"color": "red", "linestyle": "--", "alpha": 0.7, "linewidth": 2},
         "Gauss-Newton (WGN)": {"color": "blue", "linestyle": "-", "alpha": 0.8, "linewidth": 2},
         "Exact Newton": {"color": "purple", "linestyle": ":", "alpha": 0.8, "linewidth": 2.5},
         "Consider Covariance (CCA)": {"color": "green", "linestyle": "-.", "alpha": 1.0, "linewidth": 2},
@@ -110,5 +110,71 @@ def plot_ric_residuals(
                 axes[row, i].legend(loc='best')
 
     plt.suptitle('GPS vs TLE Residuals in RIC Frame', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+def plot_calibrated_doppler(
+    t_obs: torch.Tensor, 
+    doppler_obs: torch.Tensor, 
+    doppler_pred: torch.Tensor, 
+    contacts: torch.Tensor
+):
+    """
+    Plots the measured vs. calibrated Doppler curves and their residuals, 
+    segmented by contact passes.
+    """
+    # 1. Move tensors to CPU and convert to NumPy
+    t_np = t_obs.detach().cpu().numpy()
+    obs_np = doppler_obs.detach().cpu().numpy()
+    pred_np = doppler_pred.detach().cpu().numpy()
+    contacts_np = contacts.detach().cpu().numpy()
+    
+    unique_contacts = np.unique(contacts_np)
+    
+    # 2. Setup the plot canvas
+    fig, axes = plt.subplots(
+        2, 1, 
+        figsize=(12, 8), 
+        sharex=True, 
+        gridspec_kw={'height_ratios': [2, 1]}
+    )
+    
+    # 3. Iterate through each pass to prevent connecting lines across time gaps
+    for c in unique_contacts:
+        mask = contacts_np == c
+        
+        # Sort chronologically within the pass
+        sort_idx = np.argsort(t_np[mask])
+        t_c = t_np[mask][sort_idx]
+        obs_c = obs_np[mask][sort_idx]
+        pred_c = pred_np[mask][sort_idx]
+        res_c = obs_c - pred_c
+        
+        # Plot 1: Absolute Curves
+        # Only add the label to the first pass to avoid legend duplication
+        label_obs = 'Measured Data' if c == unique_contacts[0] else ""
+        label_pred = 'Calibrated Model' if c == unique_contacts[0] else ""
+        
+        axes[0].plot(t_c, obs_c, 'k.', label=label_obs, alpha=0.4, markersize=4)
+        axes[0].plot(t_c, pred_c, 'r-', label=label_pred, linewidth=2, alpha=0.8)
+        
+        # Plot 2: Residuals
+        axes[1].plot(t_c, res_c, 'b.', alpha=0.5, markersize=4)
+        
+    # 4. Formatting
+    axes[0].set_ylabel("Doppler Shift (Hz)")
+    axes[0].set_title("Measured vs. Calibrated Doppler Curves")
+    axes[0].legend(loc='upper right')
+    axes[0].grid(True, linestyle=':', alpha=0.7)
+    
+    axes[1].set_ylabel("Residual (Hz)")
+    axes[1].set_xlabel("Time Since Epoch (Minutes)")
+    axes[1].axhline(0, color='black', linestyle='--', linewidth=1.5, alpha=0.8)
+    axes[1].grid(True, linestyle=':', alpha=0.7)
+    
+    # Calculate overall RMS for the title
+    rms_error = np.sqrt(np.mean((obs_np - pred_np)**2))
+    axes[1].set_title(f"Residuals (Overall RMS: {rms_error:.2f} Hz)")
+    
     plt.tight_layout()
     plt.show()

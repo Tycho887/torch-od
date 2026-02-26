@@ -4,7 +4,7 @@ import torch
 from dsgp4.tle import TLE
 import diffod.state as state
 import diffod.functional.system as system
-from diffod.utils import load_gmat_csv_block
+from diffod.utils import load_gmat_csv_block, unix_to_mjd
 from diffod.visualize import compute_ric_residuals, print_ric_residual_summary, plot_ric_residuals
 # Solvers
 from diffod.solvers.gaussNewton import wgn_solve
@@ -22,67 +22,35 @@ TLE_list = [
     "2 60543  97.7067  19.0341 0003458 123.1215 316.4897 14.89807169 65809",
 ]
 
-epoch = 1762165047
-init_tle = TLE(data=TLE_list)
+dtype = torch.float64
+
+epoch = 1762508742#1762508742
+tle0_base = TLE(data=TLE_list)
+
 target_device = torch.device("cpu")
 
 print("Loading GPS Data...")
 # Load real GPS telemetry data at the beginning of the script
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/gps_data.csv",
+    file_path="data/AWS_long_period.csv",
     tle_epoch_unix=epoch,
-    block_sec=60*60*24, # 1 hour block
+    block_sec=7*86400#43200, # 1 hour block
 )
 
-r_gps_raw /= 1e3
-v_gps_raw /= 1e3
+epoch = float(torch.mean(input=t_gps_raw))
 
+print(f"The new epoch is: {epoch}")
+
+init_tle, _ = dsgp4.newton_method(tle0_base, unix_to_mjd(unix_seconds=epoch))    
 
 # Apply leap second offset for SGP4 propagation
-t_gps = t_gps_raw.to(target_device) #- 37.0
-r_gps = r_gps_raw.to(target_device) #/ 1e3
-v_gps = v_gps_raw.to(target_device) #/ 1e3
+t_gps = t_gps_raw.to(device=target_device, dtype=dtype) #- 37.0
+r_gps = r_gps_raw.to(device=target_device, dtype=dtype) #/ 1e3
+v_gps = v_gps_raw.to(device=target_device, dtype=dtype) #/ 1e3
 
 N_samples = len(t_gps)
 t_since_mins = (t_gps - epoch) / 60.0
 
-# ---------------------------------------------------------
-# 2. Define State Vector & Functional Forward
-# ---------------------------------------------------------
-# ssv = state.TLE_SSV(
-#     init_tle=init_tle,
-#     num_measurements=N_samples,
-#     fit_ma=True,
-#     fit_mean_motion=True,
-#     fit_argp=True,
-#     fit_bstar=True,
-#     fit_inclination=True,
-#     fit_eccentricity=True,
-#     fit_raan=True,
-# )
-
-# # --- CARTESIAN MODULAR PIPELINE ---
-# propagator = system.SGP4(ssv=ssv, use_pretrained_model=False)
-# measurement_model = system.CartesianMeasurement(ssv=ssv)
-
-# # Assuming you named the wrapper PropagatedCartesian
-# model = system.MeasurementPipeline(
-#     propagator=propagator, 
-#     measurement_model=measurement_model
-# )
-
-# # Format the ground truth GPS data into the 1D (6N,) observation vector
-# gps_obs_1d = measurement_model.format_gps_observations(r_gps=r_gps, v_gps=v_gps)
-
-# def functional_forward(x) -> torch.Tensor:
-#     # No station pos/vel or center_freq needed for Cartesian
-#     return model(x=x, tsince=t_since_mins)
-
-# ---------------------------------------------------------
-# 2. Define State Vector & Functional Forward
-# ---------------------------------------------------------
-# Swapped TLE_SSV for MEE_SSV. 
-# We replace Keplerian flags (fit_eccentricity, etc.) with MEE flags (fit_f, fit_g, etc.)
 ssv = state.MEE_SSV(
     init_tle=init_tle,
     num_measurements=N_samples,
@@ -96,7 +64,7 @@ ssv = state.MEE_SSV(
 )
 
 # --- CARTESIAN MODULAR PIPELINE ---
-propagator = system.SGP4(ssv=ssv, use_pretrained_model=True)
+propagator = system.SGP4(ssv=ssv, use_pretrained_model=False)
 measurement_model = system.CartesianMeasurement(ssv=ssv)
 
 # Assuming you named the wrapper PropagatedCartesian
@@ -120,7 +88,7 @@ x_true = ssv.get_initial_state(device=target_device)
 N_solves = 1
 x_init_batch = x_true.unsqueeze(dim=0).repeat(N_solves, 1)
 x_init_batch = x_init_batch + x_init_batch * torch.randn_like(input=x_init_batch) * 1e-4
-x_in = x_init_batch[0].type(dtype=torch.float64)
+x_in = x_init_batch[0].type(dtype=dtype)
 
 # ---------------------------------------------------------
 # 4. WGN Matrix Configurations
@@ -136,8 +104,8 @@ n_consider = n_total - n_active
 
 print(f"Total Params: {n_total} | Estimated: {n_active} | Considered: {n_consider}")
 
-P_x_inv = torch.eye(n=n_active, dtype=torch.float64, device=target_device)
-P_cc = torch.eye(n=n_consider, dtype=torch.float64, device=target_device)
+P_x_inv = torch.eye(n=n_active, dtype=dtype, device=target_device)
+P_cc = torch.eye(n=n_consider, dtype=dtype, device=target_device)
 
 # ---------------------------------------------------------
 # 5. Execute Sequential Iterations & Benchmark
@@ -146,8 +114,8 @@ print("\nExecuting OD Solvers...")
 results = {}
 
 solvers = {
-    # "Gauss-Newton (WGN)": wgn_solve,
-    # "L-BFGS": lbfgs_solve,
+    "Gauss-Newton (WGN)": wgn_solve,
+    "L-BFGS": lbfgs_solve,
     "GN-SVD": svd_solve,
     # "Consider Covariance (CCA)": cca_solve,
 }
@@ -204,7 +172,7 @@ t_mins, pos_ric_init, vel_ric_init = compute_ric_residuals(
     tle_epoch_unix=epoch
 )
 
-ric_results = {"Initial State": (pos_ric_init, vel_ric_init)}
+ric_results = {}#{"Initial State": (pos_ric_init, vel_ric_init)}
 
 print(f"Initial TLE:\n{init_tle}\n")
 
@@ -223,6 +191,9 @@ for name, res in results.items():
         v_gps=v_gps_raw, 
         tle_epoch_unix=epoch
     )
+    # if name == "Initial State": 
+    #     continue
+    print(name)
     ric_results[name] = (pos_ric_opt, vel_ric_opt)
 
 print_ric_residual_summary(ric_results)

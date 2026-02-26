@@ -6,7 +6,7 @@ import torch
 # import polars as pl
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from datetime import datetime, timezone
 # from dsgp4.tle import TLE
 
 @dataclass
@@ -62,20 +62,19 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     df_block = df[mask].copy()
     
     if df_block.empty:
-        raise ValueError(f"No GMAT data found within {block_sec}s of epoch {tle_epoch_unix}")
+        raise ValueError(f"No GMAT data found within {block_sec}s of epoch {tle_epoch_unix}. Mean is: {df['unix'].mean()}")
 
-    # Convert km to meters and extract arrays
-    # Assuming: 4,5,6 are Pos (km) and 7,8,9 are Vel (km/s)
     t_gps_np = df_block['unix'].values
-    gps_pos_np = df_block[[4, 5, 6]].values * 1000.0
-    gps_vel_np = df_block[[7, 8, 9]].values * 1000.0
+    gps_pos_np = df_block[[4, 5, 6]].values 
+    gps_vel_np = df_block[[7, 8, 9]].values 
+
+
     
     # Convert NumPy arrays to PyTorch Tensors
-    t_gps = torch.from_numpy(np.copy(t_gps_np))
-    gps_pos = torch.from_numpy(np.copy(gps_pos_np))
-    gps_vel = torch.from_numpy(np.copy(gps_vel_np))
-    
-    return t_gps+37.0, gps_pos, gps_vel
+    t_gps = torch.from_numpy(np.copy(a=t_gps_np)).to(dtype=torch.float64)
+    gps_pos = torch.from_numpy(np.copy(a=gps_pos_np)).to(dtype=torch.float64)
+    gps_vel = torch.from_numpy(np.copy(a=gps_vel_np)).to(dtype=torch.float64)
+    return t_gps, gps_pos, gps_vel
 
 def transform_tle_to_mee(
     n: torch.Tensor, 
@@ -150,3 +149,16 @@ def transform_mee_to_tle(
         "argpo": argpo,
         "mo": mo
     }
+
+def unix_to_mjd(unix_seconds: float) -> float:
+
+    # Create a UTC datetime object
+    dt = datetime.fromtimestamp(unix_seconds, tz=timezone.utc)
+
+    # Calculate Julian Date (JD)
+    jd = dt.timestamp() / 86400.0 + 2440587.5
+
+    # Convert to Modified Julian Date (MJD)
+    mjd = jd - 2400000.5
+
+    return mjd

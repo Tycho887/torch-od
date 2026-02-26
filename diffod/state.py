@@ -10,8 +10,8 @@ class BaseSSV(ABC):
     Abstract Base Class for Smart-State-Vectors. 
     Handles common logic for dynamic state sizing, active maps, and bias groups.
     """
-    def __init__(self, init_tle: TLE, num_measurements: int, orbital_flags: list[tuple[str, bool]]):
-        self.init_tle = init_tle
+    def __init__(self, num_measurements: int, orbital_flags: list[tuple[str, bool]]) -> None:
+        # self.init_tle = init_tle
         self.num_measurements = num_measurements
         
         # The core dimension is determined by the length of the provided flags
@@ -26,7 +26,7 @@ class BaseSSV(ABC):
         self.aux_param_indices: dict[str, int] = {}
 
     @abstractmethod
-    def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+    def get_initial_state(self, device: torch.device = torch.device(device="cpu")) -> torch.Tensor:
         """Constructs the initial state tensor based on the specific coordinate representation."""
         pass
 
@@ -42,7 +42,7 @@ class BaseSSV(ABC):
 
     # --- Standardized Methods ---
 
-    def add_linear_bias(self, name: str, group_indices: torch.Tensor):
+    def add_linear_bias(self, name: str, group_indices: torch.Tensor) -> None:
         valid_mask = group_indices >= 0
         if not valid_mask.any():
             return
@@ -97,7 +97,7 @@ class BaseSSV(ABC):
         return x_state[self.aux_param_indices[key]]
 
 class TLE_SSV(BaseSSV):
-    def __init__(self, init_tle: TLE, num_measurements: int, **fit_kwargs):
+    def __init__(self, init_tle: TLE, num_measurements: int, **fit_kwargs) -> None:
         orbital_flags = [
             ("mean_motion", fit_kwargs.get("fit_mean_motion", False)),
             ("eccentricity", fit_kwargs.get("fit_eccentricity", False)),
@@ -109,8 +109,8 @@ class TLE_SSV(BaseSSV):
             ("ndot", fit_kwargs.get("fit_ndot", False)),
             ("nddot", fit_kwargs.get("fit_nddot", False)),
         ]
-        super().__init__(init_tle, num_measurements, orbital_flags)
-
+        super().__init__(num_measurements=num_measurements, orbital_flags=orbital_flags)
+        self.init_tle = init_tle
         self._func_arg_map = {
             "mean_motion": ("no_kozai", "_no_kozai"),
             "eccentricity": ("ecco", "_ecco"),
@@ -146,7 +146,7 @@ class TLE_SSV(BaseSSV):
         return sat_obj
 
 class MEE_SSV(BaseSSV):
-    def __init__(self, init_tle: TLE, num_measurements: int, **fit_kwargs):
+    def __init__(self, init_tle: TLE, num_measurements: int, **fit_kwargs) -> None:
         orbital_flags = [
             ("n", fit_kwargs.get("fit_mean_motion", False)),
             ("f", fit_kwargs.get("fit_f", False)),
@@ -158,7 +158,9 @@ class MEE_SSV(BaseSSV):
             ("ndot", fit_kwargs.get("fit_ndot", False)),
             ("nddot", fit_kwargs.get("fit_nddot", False)),
         ]
-        super().__init__(init_tle, num_measurements, orbital_flags)
+        super().__init__(num_measurements=num_measurements, orbital_flags=orbital_flags)
+        self.init_tle = init_tle
+
 
     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
         x0 = torch.zeros(self.current_dim, dtype=torch.float32, requires_grad=True, device=device)
@@ -237,191 +239,41 @@ class MEE_SSV(BaseSSV):
             
         return sat_obj
 
-# import torch
-# from dsgp4.tle import TLE
-# # Assuming BiasGroup is available in diffod.utils
-# from diffod.functional.tle import update
-# from diffod.utils import BiasGroup 
-# import dsgp4
 
-# """
-# Smart state vector
-# """
-
-# class SSV:
-#     """
-#     Docstring for Smart-State-Vector
-#     """
-#     def __init__(
-#         self,
-#         init_tle: TLE,
-#         num_measurements: int,
-#         fit_mean_motion: bool = False,
-#         fit_eccentricity: bool = False,
-#         fit_inclination: bool = False,
-#         fit_raan: bool = False,
-#         fit_argp: bool = False,
-#         fit_ma: bool = False,
-#         fit_bstar: bool = False,
-#         fit_ndot: bool = False,
-#         fit_nddot: bool = False,
-#     ) -> None:
-#         self.init_tle = init_tle
-#         self.num_measurements = num_measurements
+class CalibrationSSV(BaseSSV):
+    """
+    SSV dedicated purely to measurement system calibration with per-pass bias support.
+    """
+    def __init__(
+        self, 
+        num_measurements: int, 
+        fit_time_offset: bool = True,
+    ):
+        orbital_flags = [
+            ("time_offset", fit_time_offset),  # in seconds
+        ]
         
-#         # The core state vector is permanently fixed to 9 elements.
-#         self.core_dim = 9
-#         self.current_dim = self.core_dim
+        super().__init__(num_measurements=num_measurements, orbital_flags=orbital_flags)
 
-#         # Mapping: (Internal Name) -> (Should Fit?)
-#         orbital_flags = [
-#             ("mean_motion", fit_mean_motion),
-#             ("eccentricity", fit_eccentricity),
-#             ("inclination", fit_inclination),
-#             ("raan", fit_raan),
-#             ("argument_of_perigee", fit_argp),
-#             ("mean_anomaly", fit_ma),
-#             ("b_star", fit_bstar),
-#             ("ndot", fit_ndot),
-#             ("nddot", fit_nddot),
-#         ]
+    def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+        # This will automatically size itself correctly (core params + N pass biases)
+        x0 = torch.zeros(self.current_dim, dtype=torch.float64, requires_grad=True, device=device)
+        return x0
 
-#         # All 9 parameters are always present in the state vector at fixed indices
-#         self.map_param_to_idx = {name: idx for idx, (name, _) in enumerate(orbital_flags)}
-#         self.active_flags = {name: should_fit for name, should_fit in orbital_flags}
+    def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {
+            "time_offset": x_state[self.map_param_to_idx["time_offset"]],
+        }
 
-#         self.bias_groups: dict[str, BiasGroup] = {}
-
-#         # Static mapping from our friendly names to Functional SGP4 arg names
-#         self._func_arg_map = {
-#             "mean_motion": ("no_kozai", "_no_kozai"),
-#             "eccentricity": ("ecco", "_ecco"),
-#             "inclination": ("inclo", "_inclo"),
-#             "raan": ("nodeo", "_nodeo"),
-#             "argument_of_perigee": ("argpo", "_argpo"),
-#             "mean_anomaly": ("mo", "_mo"),
-#             "b_star": ("bstar", "_bstar"),
-#             "ndot": ("ndot", "_ndot"),
-#             "nddot": ("nddot", "_nddot"),
-#         }
-
-#         self.aux_params: dict[str, float] = {}
-#         self.aux_param_indices: dict[str, int] = {}
-
-#     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-#             x0 = torch.zeros(
-#                 self.current_dim, dtype=torch.float32, requires_grad=True, device=device
-#             )
-
-#             with torch.no_grad():
-#                 for name, idx in self.map_param_to_idx.items():
-#                     _, tle_attr = self._func_arg_map[name]
-#                     x0[idx] = getattr(self.init_tle, tle_attr, 0.0)
-                    
-#                 # Populate auxiliary parameters
-#                 for key, idx in self.aux_param_indices.items():
-#                     x0[idx] = self.aux_params[key]
-                    
-#             return x0
-
-#     def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:
-#         """
-#         Extracts all 9 SGP4 parameters directly from x_state.
-#         Because x_state always contains the full core state, we bypass the TLE fallback.
-#         """
-#         args = {}
-#         for friendly_name, (func_arg_name, _) in self._func_arg_map.items():
-#             idx = self.map_param_to_idx[friendly_name]
-#             # Slicing keeps it as a scalar tensor to preserve gradients
-#             args[func_arg_name] = x_state[idx] 
+    def export(self, x: torch.Tensor) -> dict[str, float]:
+        args = self.get_functional_args(x)
+        output = {k: v.item() for k, v in args.items()}
+        
+        # Optionally export the solved pass biases as well
+        if "pass_bias" in self.bias_groups:
+            bg = self.bias_groups["pass_bias"]
+            start = bg.global_offset
+            end = start + bg.num_params
+            output["pass_biases"] = x[start:end].detach().cpu().numpy().tolist()
             
-#         return args
-
-#     def add_linear_bias(self, name: str, group_indices: torch.Tensor):
-#         valid_mask = group_indices >= 0
-#         if not valid_mask.any():
-#             return
-
-#         max_idx = group_indices[valid_mask].max().item()
-#         num_new_params = int(max_idx + 1)
-
-#         group = BiasGroup(
-#             name=name,
-#             indices=group_indices,
-#             global_offset=self.current_dim,
-#             num_params=num_new_params,
-#         )
-#         self.bias_groups[name] = group
-#         self.current_dim += num_new_params
-
-#     def get_bias_group(self, name: str) -> BiasGroup:
-#         if name in self.bias_groups:
-#             return self.bias_groups[name]
-#         raise ValueError(f"Bias group '{name}' not found.")
-
-#     def get_active_map(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-#         active_map = torch.zeros(self.current_dim, dtype=torch.bool, device=device)
-        
-#         # 1. Flag core orbital parameters
-#         for name, idx in self.map_param_to_idx.items():
-#             active_map[idx] = self.active_flags[name]
-            
-#         # 2. Bias parameters
-#         for bg in self.bias_groups.values():
-#             start = bg.global_offset
-#             end = start + bg.num_params
-#             active_map[start:end] = True
-            
-#         # 3. Auxiliary parameters are dynamic and assumed active
-#         for idx in self.aux_param_indices.values():
-#             active_map[idx] = True
-            
-#         return active_map
-
-#     def get_estimate_map(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-#         """
-#         Returns the logical inverse of the active map for Consider Covariance Analysis.
-#         True -> Parameter is Considered (uncertainty accounted for, but state fixed).
-#         False -> Parameter is Estimated.
-#         """
-#         return ~self.get_active_map(device=device)
-    
-#     def export(self, x: torch.Tensor) -> dsgp4.TLE:
-#         """
-#         Exports a TLE object with the given state vector.
-        
-#         :param x: State vector
-#         :return: dsgp4 TLE object
-#         :rtype: dsgp4.TLE
-#         """
-#         sat_obj = update(tle=self.init_tle,
-#                          x=x,
-#                          map_param_to_idx=self.map_param_to_idx)
-        
-#         assert isinstance(sat_obj, dsgp4.TLE)
-
-#         return sat_obj
-
-#     def add_parameter(self, key: str, value: float) -> None:
-#         """
-#         Adds an auxiliary parameter (e.g., time offset) to the state vector.
-        
-#         :param key: Unique string identifier for the parameter
-#         :param value: Initial float value for the parameter
-#         """
-#         if key in self.aux_param_indices:
-#             raise ValueError(f"Auxiliary parameter '{key}' already exists.")
-            
-#         self.aux_params[key] = value
-#         self.aux_param_indices[key] = self.current_dim
-#         self.current_dim += 1
-
-#     def get_aux_parameter(self, x_state: torch.Tensor, key: str) -> torch.Tensor:
-#         """
-#         Extracts the scalar tensor for an auxiliary parameter, preserving gradients.
-#         """
-#         if key not in self.aux_param_indices:
-#             raise KeyError(f"Auxiliary parameter '{key}' not found in state definition.")
-        
-#         # Slicing keeps it as a scalar tensor for Autograd
-#         return x_state[self.aux_param_indices[key]]
+        return output
