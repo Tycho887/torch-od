@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 from diffod.functional.mlsgp4 import FunctionalMLdSGP4
 from diffod.functional.sgp4 import sgp4_propagate
 from diffod.physics import apply_linear_bias, compute_doppler
@@ -79,16 +80,20 @@ class DopplerMeasurement(nn.Module):
         sat_vel: torch.Tensor,
         st_pos: torch.Tensor,
         st_vel: torch.Tensor,
-        center_freq: torch.Tensor,
+        center_freq: torch.Tensor | float,
     ) -> torch.Tensor:
         
+        args = self.ssv.get_functional_args(x)
+
+        # if self.ssv.active_flags["time_offset"]:
+        f_c = center_freq + (args["freq_offset"] * 1e6)
         # 1. Physics Projection
         raw_doppler = compute_doppler(
             sat_pos=sat_pos,
             sat_vel=sat_vel,
             st_pos=st_pos,
             st_vel=st_vel,
-            center_freq=center_freq,
+            center_freq=f_c,
         )
 
         # 2. Bias Correction
@@ -195,3 +200,73 @@ class GPSInterpolator(nn.Module):
         print(r_interp, v_interp)
 
         return r_interp, v_interp
+    
+class DifferentiableStation(torch.nn.Module):
+    """
+    A PyTorch-native Ground Station model.
+    Transforms WGS84 Geodetic to ECEF, and dynamically rotates to TEME 
+    to preserve gradients through time shifts.
+    """
+    def __init__(
+        self, 
+        lat_deg: float, 
+        lon_deg: float, 
+        alt_m: float, 
+        ref_unix: float, 
+        ref_gmst_rad: float,
+        device: torch.device = torch.device("cpu")
+    ):
+        super().__init__()
+        self.omega_earth = 7.292115146706979e-5  # rad/s (Nominal WGS84 rotation)
+        
+        # Store Reference Anchors
+        self.ref_unix = torch.tensor(ref_unix, dtype=torch.float64, device=device)
+        self.ref_gmst_rad = torch.tensor(ref_gmst_rad, dtype=torch.float64, device=device)
+        
+        # 1. WGS84 Geodetic to ECEF
+        lat = math.radians(lat_deg)
+        lon = math.radians(lon_deg)
+        alt_km = alt_m / 1000.0
+        
+        a = 6378.137  # km
+        e2 = 0.00669437999014
+        
+        N = a / math.sqrt(1 - e2 * math.sin(lat)**2)
+        x = (N + alt_km) * math.cos(lat) * math.cos(lon)
+        y = (N + alt_km) * math.cos(lat) * math.sin(lon)
+        z = (N * (1 - e2) + alt_km) * math.sin(lat)
+        
+        # Store static ECEF position
+        self.r_ecef = torch.tensor([x, y, z], dtype=torch.float64, device=device)
+        
+    def forward(self, t_unix_shifted: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Takes shifted timestamps and rotates the station in a fully differentiable manner.
+        """
+        # 1. Compute Differentiable Earth Rotation Angle (theta)
+        dt = t_unix_shifted - self.ref_unix
+        theta = self.ref_gmst_rad + self.omega_earth * dt
+        
+        # 2. Construct Rotation Matrix Rz(theta)
+        cos_t = torch.cos(theta)
+        sin_t = torch.sin(theta)
+        zeros = torch.zeros_like(theta)
+        ones = torch.ones_like(theta)
+        
+        # Shape: (N, 3, 3)
+        Rz = torch.stack([
+            torch.stack([cos_t, -sin_t, zeros], dim=-1),
+            torch.stack([sin_t,  cos_t, zeros], dim=-1),
+            torch.stack([zeros,  zeros,  ones], dim=-1)
+        ], dim=-2)
+        
+        # 3. Rotate ECEF to Inertial (TEME)
+        # Broadcasting matrix multiplication: (N, 3, 3) @ (3,) -> (N, 3)
+        r_teme = torch.matmul(Rz, self.r_ecef)
+        
+        # 4. Explicit Kinematic Velocity: v = omega x r
+        omega_vec = torch.zeros_like(r_teme)
+        omega_vec[:, 2] = self.omega_earth
+        v_teme = torch.cross(omega_vec, r_teme, dim=-1)
+        
+        return r_teme, v_teme

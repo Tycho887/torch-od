@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 # diffod imports
 from diffod.functional.system import DopplerMeasurement, GPSInterpolator, MeasurementPipeline
 from diffod.gse import station_teme_preprocessor
-from diffod.solvers.gn_svd import svd_solve as wgn_solve
+# from diffod.solvers.gn_svd import svd_solve as wgn_solve
+from diffod.solvers.gaussNewton import wgn_solve
 from diffod.utils import load_gmat_csv_block
 from diffod.state import CalibrationSSV
 from diffod.visualize import plot_calibrated_doppler
@@ -17,7 +18,7 @@ from diffod.visualize import plot_calibrated_doppler
 # ---------------------------------------------------------
 print("Loading Data...")
 epoch = 1762165047
-base_freq = 1.706e9
+base_freq = 1.8e9
 target_device = torch.device("cpu")
 stations = {0: np.array([15.376932, 78.228874, 463])}
 
@@ -41,9 +42,9 @@ N_samples = len(times_unix)
 
 # Load Ground Truth GPS
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/AWS_long_period.csv",
+    file_path="data/AWS_high_frequency.csv",
     tle_epoch_unix=float(torch.mean(times_unix)),
-    block_sec=86400*1,
+    block_sec=86400*3,
 )
 
 # ---------------------------------------------------------
@@ -104,6 +105,7 @@ print(f"Filtered to GPS window: {N_samples} valid samples remain.")
 ssv = CalibrationSSV(
     num_measurements=N_samples, 
     fit_time_offset=True, 
+    fit_frequency_offset=True,
     # fit_freq_drift=False
 )
 
@@ -137,7 +139,7 @@ def functional_forward(x) -> torch.Tensor:
         st_pos=st_pos, 
         st_vel=st_vel, 
         tsince=t_obs_centered, # Pass the centered observation times
-        center_freq=1.707e9    # Note: I corrected a small typo here; it was 1.707e6 in your snippet
+        center_freq=base_freq    # Note: I corrected a small typo here; it was 1.707e6 in your snippet
     )
 # ---------------------------------------------------------
 # 4. Execute Solver
@@ -166,7 +168,7 @@ print(f"Calibration finished in {(t1 - t0) * 1000:.2f} ms")
 calibrated_params = ssv.export(x_out)
 print("\n--- Calibration Results ---")
 print(f"Time Offset (seconds): {calibrated_params['time_offset']:.6e}")
-# print(f"Freq Drift (Hz/min): {calibrated_params['freq_drift']:.6e}")
+print(f"Freq (Hz): {base_freq + 1e6*calibrated_params['freq_offset']:.6e}")
 
 biases = calibrated_params.get("pass_biases", [])
 print(f"Estimated biases: {biases}")

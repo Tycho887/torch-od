@@ -117,6 +117,8 @@ solvers = {
     "Gauss-Newton (WGN)": wgn_solve,
     "L-BFGS": lbfgs_solve,
     "GN-SVD": svd_solve,
+    # "Newton": newton_solve,
+
     # "Consider Covariance (CCA)": cca_solve,
 }
 

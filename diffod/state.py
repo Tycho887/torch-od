@@ -248,9 +248,11 @@ class CalibrationSSV(BaseSSV):
         self, 
         num_measurements: int, 
         fit_time_offset: bool = True,
-    ):
+        fit_frequency_offset: bool = True,
+    ) -> None:
         orbital_flags = [
             ("time_offset", fit_time_offset),  # in seconds
+            ("freq_offset", fit_frequency_offset),  # in Hz
         ]
         
         super().__init__(num_measurements=num_measurements, orbital_flags=orbital_flags)
@@ -263,6 +265,7 @@ class CalibrationSSV(BaseSSV):
     def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:
         return {
             "time_offset": x_state[self.map_param_to_idx["time_offset"]],
+            "freq_offset": x_state[self.map_param_to_idx["freq_offset"]],
         }
 
     def export(self, x: torch.Tensor) -> dict[str, float]:

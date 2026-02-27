@@ -74,7 +74,7 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     t_gps = torch.from_numpy(np.copy(a=t_gps_np)).to(dtype=torch.float64)
     gps_pos = torch.from_numpy(np.copy(a=gps_pos_np)).to(dtype=torch.float64)
     gps_vel = torch.from_numpy(np.copy(a=gps_vel_np)).to(dtype=torch.float64)
-    return t_gps, gps_pos, gps_vel
+    return t_gps+5, gps_pos, gps_vel
 
 def transform_tle_to_mee(
     n: torch.Tensor, 

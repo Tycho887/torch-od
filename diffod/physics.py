@@ -38,7 +38,7 @@ def compute_range(sat_pos, st_pos) -> torch.Tensor:
 
 
 def apply_linear_bias(
-    predictions: torch.Tensor, x_state: torch.Tensor, bias_group: BiasGroup
+    predictions: torch.Tensor, x_state: torch.Tensor, bias_group: BiasGroup, scaling: float = 1e3
 ) -> torch.Tensor:
     if bias_group is None:
         return predictions
@@ -61,6 +61,6 @@ def apply_linear_bias(
     # 4. Apply
     # We clone to avoid in-place modification errors in AD
     corrected = predictions.clone()
-    corrected[mask] = corrected[mask] + active_biases
+    corrected[mask] = corrected[mask] + active_biases * scaling
 
     return corrected
