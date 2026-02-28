@@ -69,7 +69,7 @@ tle0_base = TLE(data=TLE_list)
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
     file_path="data/AWS_long_period.csv",
     tle_epoch_unix=epoch_unix,
-    block_sec=86400 * 3,
+    block_sec=86400 * 0.5,
 )
 
 
