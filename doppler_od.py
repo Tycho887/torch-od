@@ -10,7 +10,7 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import load_gmat_csv_block, unix_to_mjd
-from diffod.visualize import plot_calibrated_doppler, plot_residual_diagnostics
+from diffod.visualize import plot_calibrated_doppler, plot_residual_diagnostics, plot_pass_biases
 from diffod.solvers.gn_svd import svd_solve
 
 
@@ -242,5 +242,15 @@ plot_calibrated_doppler(
     contacts=contacts
 )
 
-residuals = doppler_obs - doppler_pred
-plot_residual_diagnostics(residuals)
+# residuals = doppler_obs - doppler_pred
+# plot_residual_diagnostics(residuals)
+
+# Extract and scale biases
+bg_freq = ssv_calib.get_bias_group("pass_freq_bias")
+bg_time = ssv_calib.get_bias_group("pass_time_bias")
+
+freq_biases_hz = x_calib_out[bg_freq.global_offset : bg_freq.global_offset + bg_freq.num_params] * 1000.0
+time_biases_sec = x_calib_out[bg_time.global_offset : bg_time.global_offset + bg_time.num_params]
+
+# Plot the biases
+plot_pass_biases(freq_biases_hz=freq_biases_hz, time_biases_sec=time_biases_sec)

@@ -4,6 +4,7 @@ import dsgp4
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from scipy import stats
 
 def compute_ric_residuals(
     x_state: torch.Tensor,
@@ -179,10 +180,9 @@ def plot_calibrated_doppler(
     plt.tight_layout()
     plt.show()
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy import stats
+# import torch
+# import numpy as np
+# import matplotlib.pyplot as plt
 
 def plot_residual_diagnostics(residuals: torch.Tensor, lags: int = 50, num_bins: int = 30):
     """
@@ -267,3 +267,67 @@ def plot_residual_diagnostics(residuals: torch.Tensor, lags: int = 50, num_bins:
     plt.show()
     
     return chi2_stat, p_val
+
+# import torch
+# import numpy as np
+# import matplotlib.pyplot as plt
+
+def plot_pass_biases(freq_biases_hz: torch.Tensor | np.ndarray | list, 
+                     time_biases_sec: torch.Tensor | np.ndarray | list, 
+                     pass_indices: list | np.ndarray = None):
+    """
+    Plots the estimated frequency and timing biases for each contact pass.
+    Useful for system calibration diagnostics prior to Orbit Determination.
+    """
+    # Detach and convert to numpy arrays if they are PyTorch tensors
+    if isinstance(freq_biases_hz, torch.Tensor):
+        freq_biases_hz = freq_biases_hz.detach().cpu().numpy()
+    if isinstance(time_biases_sec, torch.Tensor):
+        time_biases_sec = time_biases_sec.detach().cpu().numpy()
+        
+    # Ensure they are flat arrays
+    freq_biases_hz = np.atleast_1d(np.squeeze(freq_biases_hz))
+    time_biases_sec = np.atleast_1d(np.squeeze(time_biases_sec))
+        
+    N_passes = len(freq_biases_hz)
+    if pass_indices is None:
+        pass_indices = np.arange(N_passes)
+        
+    # Setup Figure
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    
+    # ---------------------------------------------------------
+    # 0: Compute mean and variance
+    # ---------------------------------------------------------
+    freq_mean = np.mean(freq_biases_hz)
+    freq_std = np.std(freq_biases_hz)
+
+    time_mean = np.mean(time_biases_sec)
+    time_std = np.std(time_biases_sec)
+    
+    # ---------------------------------------------------------
+    # Plot 1: Frequency Biases
+    # ---------------------------------------------------------
+    axes[0].plot(pass_indices, freq_biases_hz, marker='o', linestyle='-', 
+                 color='#1f77b4', linewidth=2, markersize=6)
+    axes[0].set_ylabel("Frequency Bias (Hz)")
+    axes[0].set_title("Calibrated Per-Pass Biases")
+    axes[0].grid(True, linestyle=':', alpha=0.7)
+    axes[0].hlines(freq_mean, xmin=pass_indices[0], xmax=pass_indices[-1], label=f"Mean: {freq_mean:.3f}, std: {freq_std:.3f}")
+    axes[0].legend()
+
+    # ---------------------------------------------------------
+    # Plot 2: Time Biases
+    # ---------------------------------------------------------
+    axes[1].plot(pass_indices, time_biases_sec, marker='s', linestyle='-', 
+                 color='#d62728', linewidth=2, markersize=6)
+    axes[1].set_ylabel("Time Bias (Seconds)")
+    axes[1].set_xlabel("Contact Pass Index")
+    axes[1].grid(True, linestyle=':', alpha=0.7)
+    axes[1].hlines(time_mean, xmin=pass_indices[0], xmax=pass_indices[-1], label=f"Mean: {time_mean:.3f}, std: {time_std:.3f}")
+    axes[1].legend()
+    # Force the x-axis to show integer ticks for discrete passes
+    axes[1].set_xticks(pass_indices)
+    
+    plt.tight_layout()
+    plt.show()

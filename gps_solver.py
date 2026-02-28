@@ -24,7 +24,7 @@ TLE_list = [
 
 dtype = torch.float64
 
-epoch = 1762508742#1762508742
+epoch = 1736769569.1462152#1762508742
 tle0_base = TLE(data=TLE_list)
 
 target_device = torch.device("cpu")
@@ -32,9 +32,9 @@ target_device = torch.device("cpu")
 print("Loading GPS Data...")
 # Load real GPS telemetry data at the beginning of the script
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/AWS_long_period.csv",
+    file_path="data/AWS_simulated.csv",
     tle_epoch_unix=epoch,
-    block_sec=5*86400#43200, # 1 hour block
+    block_sec=1*86400, 
 )
 
 epoch = float(torch.mean(input=t_gps_raw))
@@ -115,7 +115,7 @@ results = {}
 
 solvers = {
     "Gauss-Newton (WGN)": wgn_solve,
-    "L-BFGS": lbfgs_solve,
+    # "L-BFGS": lbfgs_solve,
     "GN-SVD": svd_solve,
     # "Newton": newton_solve,
 

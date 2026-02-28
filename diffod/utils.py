@@ -225,3 +225,66 @@ def segment_phase_slips(
     _, final_contacts = torch.unique(segmented_contacts, return_inverse=True)
     
     return final_contacts.to(torch.int32)
+
+import torch
+import numpy as np
+import polars as pl
+
+def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.float64):
+    """
+    Loads a GMAT .gmd file (DSN_TCP) and transforms it into PyTorch tensors.
+    
+    Args:
+        file_path: Path to the .gmd file.
+        center_freq_hz: The nominal frequency to subtract (e.g., 2.2e9).
+        device: Torch device.
+        dtype: Torch data type.
+        
+    Returns:
+        times_unix: Tensor of timestamps (Unix seconds).
+        doppler_meas: Tensor of (Raw_Freq - Center_Freq) in Hz.
+        contacts: Contiguous integer tensor (0, 1, 2...) identifying discrete passes.
+    """
+    # 1. Read the raw text file, skipping potential header metadata
+    # GMD files are space-separated. Columns: [MJD, Type, ID, {Tags}, Participant1, Participant2, Value]
+    data = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 7 or parts[1] != "DSN_TCP":
+                continue
+            # Extract MJD (Column 0) and Raw Frequency (Column 9 in DSN_TCP format)
+            data.append([float(parts[0]), float(parts[-1])])
+
+    raw_arr = np.array(data)
+    
+    # 2. Convert MJD to Unix Seconds
+    # GMAT TAIModJulian = MJD + 2430000.5 (JD). 
+    # Standard MJD to Unix conversion: (MJD - 40587.0) * 86400
+    mjd_vals = raw_arr[:, 0]
+    times_unix_np = (mjd_vals - 40587.0) * 86400.0
+    
+    # 3. Calculate Doppler Shift (Observed - Nominal)
+    # Note: GMD DSN_TCP values are often negative in GMAT output; 
+    # we take the absolute to get the physical frequency if needed.
+    raw_freqs = np.abs(raw_arr[:, 1])
+    doppler_hz_np = raw_freqs - center_freq_hz
+    
+    # 4. Generate "Contacts" (Pass-Splitting)
+    # If delta_t > 2 seconds, it is a new pass.
+    time_diffs = np.diff(times_unix_np, prepend=times_unix_np[0])
+    pass_flags = time_diffs > 2.0
+    contacts_np = np.cumsum(pass_flags).astype(np.int32)
+    
+    # 5. Convert to PyTorch Tensors
+    times_unix = torch.tensor(times_unix_np, device=device, dtype=dtype)
+    doppler_meas = torch.tensor(doppler_hz_np, device=device, dtype=dtype)
+    contacts = torch.tensor(contacts_np, device=device, dtype=torch.int32)
+    
+    print(f"Loaded {len(times_unix)} points across {contacts.max().item() + 1} passes.")
+    
+    return times_unix, doppler_meas, contacts
+
+# Example usage within your pipeline:
+# center_freq = 2.2e9 
+# t_obs, d_obs, c_obs = load_gmd_to_tensors("output_dsn_tcp_biased.gmd", center_freq)
