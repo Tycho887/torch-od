@@ -243,6 +243,7 @@ class MEE_SSV(BaseSSV):
 class CalibrationSSV(BaseSSV):
     """
     SSV dedicated purely to measurement system calibration with per-pass bias support.
+    Includes parameter normalization to ensure well-conditioned Jacobian matrices.
     """
     def __init__(
         self, 
@@ -251,32 +252,43 @@ class CalibrationSSV(BaseSSV):
         fit_frequency_offset: bool = True,
     ) -> None:
         orbital_flags = [
-            ("time_offset", fit_time_offset),  # in seconds
-            ("freq_offset", fit_frequency_offset),  # in Hz
+            ("time_offset", fit_time_offset),
+            ("freq_offset", fit_frequency_offset),
         ]
         
         super().__init__(num_measurements=num_measurements, orbital_flags=orbital_flags)
+        
+        # Define physical scales. 
+        # A value of 1.0 in the optimizer's state vector maps to these physical magnitudes.
+        self.scales = {
+            "time_offset": 10.0,    # 1.0 state unit = 10.0 seconds
+            "freq_offset": 1000.0,  # 1.0 state unit = 1000.0 Hz
+        }
 
     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-        # This will automatically size itself correctly (core params + N pass biases)
         x0 = torch.zeros(self.current_dim, dtype=torch.float64, requires_grad=True, device=device)
         return x0
 
     def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:
+        # Inflate the normalized state back to physical units for the forward pass
         return {
-            "time_offset": x_state[self.map_param_to_idx["time_offset"]],
-            "freq_offset": x_state[self.map_param_to_idx["freq_offset"]],
+            "time_offset": x_state[self.map_param_to_idx["time_offset"]] * self.scales["time_offset"],
+            "freq_offset": x_state[self.map_param_to_idx["freq_offset"]] * self.scales["freq_offset"],
         }
 
     def export(self, x: torch.Tensor) -> dict[str, float]:
+        # get_functional_args already applies the scaling, so we just extract the physical values
         args = self.get_functional_args(x)
         output = {k: v.item() for k, v in args.items()}
         
-        # Optionally export the solved pass biases as well
+        # Scale the solved pass biases 
         if "pass_bias" in self.bias_groups:
             bg = self.bias_groups["pass_bias"]
             start = bg.global_offset
             end = start + bg.num_params
-            output["pass_biases"] = x[start:end].detach().cpu().numpy().tolist()
+            
+            # Since apply_linear_bias in physics.py defaults to scaling=1e3 (1000 Hz),
+            # we multiply the state by 1000.0 to export the true Hz value.
+            output["pass_biases"] = (x[start:end] * 1000.0).detach().cpu().numpy().tolist()
             
         return output

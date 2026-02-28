@@ -29,13 +29,13 @@ def solve_gn_step(
     Identity = torch.eye(Hn.shape[0], dtype=Hn.dtype, device=Hn.device)
     Hn_damped = Hn + lambda_damp * Identity
 
-    print(f"Hessian: {Hn_damped}")
+    # print(f"Hessian: {Hn_damped}")
     print(f"Cond (Damped): {torch.linalg.cond(Hn_damped):.2f}")
     
     dx_tilde = torch.linalg.solve(Hn_damped, bn)
     dx = dx_tilde / col_norms
 
-    print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
+    print(f"Update Norm: {dx}")
     
     # Covariance estimate remains based on the undamped Hessian
     # Add a tiny eps to diagonal if strictly needed for inversion
@@ -70,7 +70,7 @@ def wgn_solve(
         
         # 2. Mask Jacobian for estimated parameters only
         J_masked = J_full[:, estimate_mask]
-        
+
         # 3. Solve Normal Equations
         dx, P_cov = solve_gn_step(J_masked, y_model, y_obs_fixed, sqrt_w)
         

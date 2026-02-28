@@ -16,6 +16,8 @@ def solve_newton_step(
     d = torch.sqrt(torch.abs(torch.diag(H)) + eps)
     D_inv = 1.0 / d
     
+    print(g)
+
     # Scale H and g: H_scaled = D_inv * H * D_inv, g_scaled = D_inv * g
     H_scaled = D_inv[:, None] * H * D_inv[None, :]
     g_scaled = D_inv * g
@@ -23,15 +25,15 @@ def solve_newton_step(
     # print(f"cond: {torch.linalg.cond(H):.2e}")
     
     # Solve the well-conditioned system: H_scaled * dx_scaled = -g_scaled
-    dx_scaled = torch.linalg.solve(H, -g)
+    dx_scaled = torch.linalg.solve(H_scaled, -g_scaled)
     
     # Revert the scaling on the update vector
     dx = D_inv * dx_scaled
     
     # Covariance estimate: H^-1
     # We use the scaled H to compute the inverse safely, then unscale it
-    # P_cov = D_inv[:, None] * torch.linalg.inv(H_scaled) * D_inv[None, :]
-    P_cov = torch.linalg.inv(H)
+    P_cov = D_inv[:, None] * torch.linalg.inv(H_scaled) * D_inv[None, :]
+    # P_cov = torch.linalg.inv(H)
 
     return dx, P_cov
 
