@@ -29,7 +29,7 @@ def compute_doppler(sat_pos, sat_vel, st_pos, st_vel, center_freq) -> torch.Tens
 
     # Doppler Equation: - (range_rate / c) * f
     c_km_s = 299792.458
-    return -(range_rate / c_km_s) * center_freq
+    return -(range_rate / c_km_s) * center_freq * 1e6
 
 
 def compute_range(sat_pos, st_pos) -> torch.Tensor:

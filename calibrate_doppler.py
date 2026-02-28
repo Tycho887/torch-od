@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 # diffod imports
 from diffod.functional.system import DopplerMeasurement, GPSInterpolator, MeasurementPipeline, DifferentiableStation
 from diffod.solvers.newton import newton_solve
+from diffod.solvers.gn_svd import svd_solve
+from diffod.solvers.lbfgs import lbfgs_solve
 from diffod.utils import load_gmat_csv_block
 from diffod.state import CalibrationSSV
 from diffod.visualize import plot_calibrated_doppler
@@ -16,7 +18,7 @@ from astropy.time import Time
 # 1. Setup Data & Initial Parameters
 # ---------------------------------------------------------
 print("Loading Data...")
-base_freq = 1.8e9
+base_freq = 1.707e3
 target_device = torch.device("cpu")
 stations = {0: np.array([15.376932, 78.228874, 463])}
 
@@ -26,11 +28,13 @@ times_unix = torch.tensor(period_telemetry["timestamp"].to_numpy(), dtype=torch.
 doppler_obs = torch.tensor(period_telemetry["Doppler_Hz"].to_numpy(), dtype=torch.float64, device=target_device)
 contacts = torch.tensor(period_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=target_device)
 
+times_unix += 0#60
+
 # Load Ground Truth GPS
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
     file_path="data/AWS_high_frequency.csv",
     tle_epoch_unix=float(torch.mean(times_unix)),
-    block_sec=86400 * 3,
+    block_sec=86400 * 5,
 )
 
 # ---------------------------------------------------------
@@ -50,7 +54,7 @@ N_samples = len(times_unix)
 print(f"Filtered to GPS window: {N_samples} valid samples remain.")
 
 # Calculate the central epoch for numerical stability
-T_mean = float(t_gps_raw.mean())
+T_mean = float(t_gps_raw.mean()) 
 
 # Create centered time arrays (tsince) for the solver
 t_gps_centered = (t_gps_raw - T_mean).to(target_device)
@@ -79,7 +83,7 @@ station_model = DifferentiableStation(
 ssv = CalibrationSSV(
     num_measurements=N_samples, 
     fit_time_offset=True, 
-    fit_frequency_offset=True,
+    fit_frequency_offset=False,
 )
 
 # Add per-pass bias groups
@@ -122,13 +126,13 @@ estimate_map = ssv.get_active_map(device=target_device)
 print(f"\nExecuting Calibration Solver... (Total Params: {len(x_in)})")
 t0 = time.perf_counter()
 
-x_out, P_out = newton_solve(
+x_out, P_out = lbfgs_solve(
     x_init=x_in,
     y_obs_fixed=doppler_obs,
     forward_fn=functional_forward,
     sigma_obs=10.0,
     estimate_mask=estimate_map,
-    num_steps=5, 
+    # num_steps=5, 
 )
 
 t1 = time.perf_counter()

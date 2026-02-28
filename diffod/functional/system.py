@@ -207,9 +207,6 @@ class GPSInterpolator(nn.Module):
         weight = (t_eval - t0) / (t1 - t0)
         weight = weight.unsqueeze(-1) # Shape (N, 1) for broadcasting over (X, Y, Z)
 
-        # print(t0, t1, t_eval)
-        # print(weight)
-
         # 5. Differentiable Linear Interpolation
         r_interp = r0 + weight * (r1 - r0)
         v_interp = v0 + weight * (v1 - v0)
