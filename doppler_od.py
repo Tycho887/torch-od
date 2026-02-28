@@ -67,10 +67,12 @@ tle0_base = TLE(data=TLE_list)
 
 # Load Ground Truth GPS
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/AWS_high_frequency.csv", # Assuming you want the high-freq block here
+    file_path="data/AWS_long_period.csv",
     tle_epoch_unix=epoch_unix,
-    block_sec=86400 * 0.5,
+    block_sec=86400 * 3,
 )
+
+
 
 # Set the central epoch based on the data
 T_mean = float(torch.mean(t_gps_raw))
@@ -84,6 +86,10 @@ v_gps = v_gps_raw.to(device=target_device, dtype=dtype)
 
 # Load Doppler Telemetry
 period_telemetry = pl.read_parquet("data/period_telemetry.parquet")
+# If any measurement assosiated with a contact_index is above 40,000 we want to remove all measurements with that index:
+bad_indices = period_telemetry.filter(pl.col("Doppler_Hz").abs() > 50000)["contact_index"].unique()
+period_telemetry = period_telemetry.filter(~pl.col("contact_index").is_in(bad_indices))
+
 times_unix = torch.tensor(period_telemetry["timestamp"].to_numpy(), dtype=dtype, device=target_device)
 doppler_obs = torch.tensor(period_telemetry["Doppler_Hz"].to_numpy(), dtype=dtype, device=target_device)
 contacts = torch.tensor(period_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=target_device)
