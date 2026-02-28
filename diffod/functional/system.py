@@ -136,6 +136,7 @@ class CartesianMeasurement(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        tsince: torch.Tensor,
         sat_pos: torch.Tensor,
         sat_vel: torch.Tensor,
     ) -> torch.Tensor:
@@ -170,6 +171,7 @@ class GPSInterpolator(nn.Module):
 
     def forward(self, x: torch.Tensor, tsince: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         args = self.ssv.get_functional_args(x)
+        print(args.get("time_offset", 0.0))
         total_time_offset = args.get("time_offset", 0.0)
 
         # Dynamically extract and apply per-pass time biases

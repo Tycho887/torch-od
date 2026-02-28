@@ -43,7 +43,7 @@ times_unix += 0#60
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
     file_path="data/AWS_high_frequency.csv",
     tle_epoch_unix=float(torch.mean(times_unix)),
-    block_sec=86400 * 5,
+    block_sec=86400 * 0.5,
 )
 
 # ---------------------------------------------------------
@@ -94,13 +94,13 @@ station_model = DifferentiableStation(
 # Define State Vector
 ssv = CalibrationSSV(
     num_measurements=N_samples, 
-    fit_time_offset=False, 
+    fit_time_offset=True, 
     fit_frequency_offset=False,
 )
 
 # Add per-pass bias groups
 ssv.add_linear_bias(name="pass_freq_bias", group_indices=freq_contacts)
-ssv.add_linear_bias(name="pass_time_bias", group_indices=time_contacts)
+# ssv.add_linear_bias(name="pass_time_bias", group_indices=time_contacts)
 
 # Initialize Empirical Propagator (now aware of time biases)
 interpolator = GPSInterpolator(
@@ -108,7 +108,7 @@ interpolator = GPSInterpolator(
     t_gps_ref=t_gps_centered, 
     r_gps_ref=r_gps, 
     v_gps_ref=v_gps,
-    time_bias_group=ssv.get_bias_group("pass_time_bias")
+    # time_bias_group=ssv.get_bias_group("pass_time_bias")
 )
 
 # Initialize Measurement Model
@@ -116,7 +116,7 @@ doppler_model = DopplerMeasurement(
     ssv=ssv, 
     station_model=station_model,
     freq_bias_group=ssv.get_bias_group("pass_freq_bias"),
-    time_bias_group=ssv.get_bias_group("pass_time_bias")
+    # time_bias_group=ssv.get_bias_group("pass_time_bias")
 )
 
 model = MeasurementPipeline(propagator=interpolator, measurement_model=doppler_model)
@@ -138,11 +138,11 @@ estimate_map = ssv.get_active_map(device=target_device)
 print(f"\nExecuting Calibration Solver... (Total Params: {len(x_in)})")
 t0 = time.perf_counter()
 
-x_out, P_out = lbfgs_solve(
+x_out, P_out = svd_solve(
     x_init=x_in,
     y_obs_fixed=doppler_obs,
     forward_fn=functional_forward,
-    sigma_obs=200.0,
+    sigma_obs=50.0,
     estimate_mask=estimate_map,
     # num_steps=5, 
 )
@@ -158,8 +158,10 @@ print("\n--- Calibration Results ---")
 print(f"Global Time Offset (seconds): {calibrated_params['time_offset']:.6f}")
 print(f"Global Freq (Hz): {base_freq + calibrated_params['freq_offset']:.6f}") 
 
+print(f"Timing biases: {x_out}")
+
 freq_biases = calibrated_params.get("pass_freq_bias", [])
-time_biases = calibrated_params.get("pass_time_bias", [])
+# time_biases = calibrated_params.get("pass_time_bias", [])
 
 # Plotting the frequency random walk
 if freq_biases:
