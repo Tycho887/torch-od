@@ -162,3 +162,66 @@ def unix_to_mjd(unix_seconds: float) -> float:
     mjd = jd - 2400000.5
 
     return mjd
+
+def segment_phase_slips(
+    times_unix: torch.Tensor, 
+    doppler_hz: torch.Tensor, 
+    base_contacts: torch.Tensor, 
+    window_size: int = 11,
+    n_sigmas: float = 3.0,
+    min_jump_hz: float = 30.0
+) -> torch.Tensor:
+    """
+    Scans raw Doppler data using a rolling Hampel filter to isolate jumps,
+    and segments the contact indices to assign unique OD biases.
+    """
+    # 1. Setup the sliding window dimensions
+    if window_size % 2 == 0:
+        window_size += 1  # Ensure window is odd for a true center point
+    half_win = window_size // 2
+    
+    # 2. Create vectorized rolling windows
+    # Shape transitions from (N,) -> (N - window_size + 1, window_size)
+    windows = doppler_hz.unfold(0, window_size, 1)
+    
+    # 3. Calculate rolling median and Median Absolute Deviation (MAD)
+    rolling_median = torch.median(windows, dim=1).values
+    abs_dev = torch.abs(windows - rolling_median.unsqueeze(1))
+    rolling_mad = torch.median(abs_dev, dim=1).values
+    
+    # 4. Calculate Hampel threshold 
+    # (1.4826 scales the MAD to estimate standard deviation for a normal distribution)
+    statistical_threshold = n_sigmas * 1.4826 * rolling_mad
+    
+    # Clamp to a physical minimum to prevent micro-segmenting highly quiet data regions
+    effective_threshold = torch.clamp(statistical_threshold, min=min_jump_hz)
+    
+    # 5. Identify anomalies on the center points of our windows
+    center_points = doppler_hz[half_win:-half_win]
+    anomaly_mask = torch.abs(center_points - rolling_median) > effective_threshold
+    
+    # 6. Isolate boundaries: Do not flag windows that cross between different satellite passes
+    pass_windows = base_contacts.unfold(0, window_size, 1)
+    center_passes = pass_windows[:, half_win].unsqueeze(1)
+    # A window is valid only if all points in it belong to the center point's pass
+    valid_windows = (pass_windows == center_passes).all(dim=1)
+    anomaly_mask &= valid_windows
+    
+    # 7. Map anomalies back to the original tensor shape
+    is_anomaly = torch.zeros_like(doppler_hz, dtype=torch.bool)
+    is_anomaly[half_win:-half_win] = anomaly_mask
+    
+    # 8. Rising edge detection
+    # A step-function slip might flag 3 consecutive points. We only want to increment
+    # the segment counter ONCE per slip event to avoid shattering the segment.
+    rising_edge = is_anomaly.clone()
+    rising_edge[1:] = is_anomaly[1:] & ~is_anomaly[:-1]
+    
+    # 9. Create the new segmented contact array
+    cumulative_jumps = torch.cumsum(rising_edge.to(torch.int32), dim=0)
+    segmented_contacts = base_contacts + cumulative_jumps
+    
+    # 10. Remap to ensure indices are strictly contiguous from 0
+    _, final_contacts = torch.unique(segmented_contacts, return_inverse=True)
+    
+    return final_contacts.to(torch.int32)

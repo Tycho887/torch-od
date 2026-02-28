@@ -12,6 +12,7 @@ def lbfgs_solve(
     max_iter: int = 500,
     tolerance_grad: float = 1e-7,
     tolerance_change: float = 1e-9,
+    robust_c: float = 3.0,  # <-- NEW: Outlier threshold in sigmas (0 means use L2)
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -37,23 +38,24 @@ def lbfgs_solve(
     def closure():
         optimizer.zero_grad()
         
-        # 1. Reconstruct the full state vector dynamically
         x_current = x_full.clone()
         x_current[estimate_mask] = x_opt
         
-        # 2. Forward pass
         y_model = forward_fn(x_current)
-        
-        # 3. Compute loss (Weighted Sum of Squared Residuals)
         residual = y_obs_fixed - y_model
         
-        # Assuming sigma_obs acts as the standard deviation for the weights
-        # W = 1 / sigma_obs**2
-        loss = torch.sum((residual / sigma_obs) ** 2)
+        # Normalize the residual by the expected noise floor
+        norm_res = residual / sigma_obs
+        
+        if robust_c > 0.0:
+            # Cauchy Robust Loss: Ignores anything far outside the 'epsilon cone'
+            loss = torch.sum((robust_c**2) * torch.log(1 + (norm_res / robust_c)**2))
+        else:
+            # Standard L2 Loss
+            loss = torch.sum(norm_res ** 2)
         
         loss.backward()
         
-        # Print RMSE for debugging (optional)
         rmse = torch.sqrt(torch.mean(residual**2)).item()
         print(f"L-BFGS Step RMSE: {rmse:.6f} | Loss: {loss.item():.6e}")
         

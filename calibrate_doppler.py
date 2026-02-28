@@ -9,7 +9,7 @@ from diffod.functional.system import DopplerMeasurement, GPSInterpolator, Measur
 from diffod.solvers.newton import newton_solve
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.lbfgs import lbfgs_solve
-from diffod.utils import load_gmat_csv_block
+from diffod.utils import load_gmat_csv_block, segment_phase_slips
 from diffod.state import CalibrationSSV
 from diffod.visualize import plot_calibrated_doppler
 from astropy.time import Time
@@ -27,6 +27,15 @@ period_telemetry = pl.read_parquet("data/period_telemetry.parquet")
 times_unix = torch.tensor(period_telemetry["timestamp"].to_numpy(), dtype=torch.float64, device=target_device)
 doppler_obs = torch.tensor(period_telemetry["Doppler_Hz"].to_numpy(), dtype=torch.float64, device=target_device)
 contacts = torch.tensor(period_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=target_device)
+
+# 1. Segment the frequency contacts based on physical limits
+# (60 Hz/s is a safe upper bound for 1.8 GHz in LEO, but you can tune this by looking at your data)
+freq_contacts = contacts #egment_phase_slips(times_unix, doppler_obs, contacts)
+
+# 2. Keep the original macro-pass array for time biases
+time_contacts = contacts 
+
+# 3. Add them to your SSV separately
 
 times_unix += 0#60
 
@@ -46,6 +55,9 @@ valid_mask = (times_unix >= gps_start) & (times_unix <= gps_end)
 times_unix = times_unix[valid_mask]
 doppler_obs = doppler_obs[valid_mask]
 contacts = contacts[valid_mask]
+freq_contacts = freq_contacts[valid_mask]
+time_contacts = time_contacts[valid_mask]
+
 
 # Remap contact indices to be strictly contiguous starting from 0
 _, remapped_contacts = torch.unique(contacts, return_inverse=True)
@@ -82,13 +94,13 @@ station_model = DifferentiableStation(
 # Define State Vector
 ssv = CalibrationSSV(
     num_measurements=N_samples, 
-    fit_time_offset=True, 
+    fit_time_offset=False, 
     fit_frequency_offset=False,
 )
 
 # Add per-pass bias groups
-ssv.add_linear_bias(name="pass_freq_bias", group_indices=contacts)
-ssv.add_linear_bias(name="pass_time_bias", group_indices=contacts)
+ssv.add_linear_bias(name="pass_freq_bias", group_indices=freq_contacts)
+ssv.add_linear_bias(name="pass_time_bias", group_indices=time_contacts)
 
 # Initialize Empirical Propagator (now aware of time biases)
 interpolator = GPSInterpolator(
@@ -130,7 +142,7 @@ x_out, P_out = lbfgs_solve(
     x_init=x_in,
     y_obs_fixed=doppler_obs,
     forward_fn=functional_forward,
-    sigma_obs=10.0,
+    sigma_obs=200.0,
     estimate_mask=estimate_map,
     # num_steps=5, 
 )
@@ -155,7 +167,7 @@ if freq_biases:
     plt.figure(figsize=(10, 5))
     plt.plot(pass_indices, freq_biases, marker='o', linestyle='-', color='b', linewidth=2, markersize=6)
     plt.title("Per-Pass Doppler Frequency Bias (Random Walk)")
-    plt.xlabel("Contact Pass Index")
+    plt.xlabel("Contact Pass Index")        
     plt.ylabel("Frequency Bias (Hz)")
     plt.grid(True, linestyle=':', alpha=0.7)
     plt.tight_layout()
