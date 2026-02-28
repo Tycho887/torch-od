@@ -178,3 +178,92 @@ def plot_calibrated_doppler(
     
     plt.tight_layout()
     plt.show()
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+
+def plot_residual_diagnostics(residuals: torch.Tensor, lags: int = 50, num_bins: int = 30):
+    """
+    Generates an Autocorrelation Function (ACF) plot and a distribution plot 
+    with a Chi-Squared goodness-of-fit test for normality.
+    """
+    # Detach and convert to 1D numpy array
+    res = residuals.detach().cpu().numpy().flatten()
+    N = len(res)
+    
+    # 1. Setup Figure
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # ---------------------------------------------------------
+    # Plot 1: Autocorrelation Function (ACF)
+    # ---------------------------------------------------------
+    ax_acf = axes[0]
+    
+    # Calculate and plot ACF (normed=True scales lag-0 to 1.0)
+    ax_acf.acorr(res, maxlags=lags, usevlines=True, normed=True, color='blue', lw=2)
+    
+    # 95% Confidence Intervals for White Noise: +/- 1.96 / sqrt(N)
+    conf_interval = 1.96 / np.sqrt(N)
+    ax_acf.axhline(conf_interval, color='red', linestyle='--', alpha=0.7)
+    ax_acf.axhline(-conf_interval, color='red', linestyle='--', alpha=0.7)
+    ax_acf.axhline(0, color='black', lw=1)
+    
+    ax_acf.set_title("Autocorrelation Function (ACF)")
+    ax_acf.set_xlabel("Lag")
+    ax_acf.set_ylabel("Autocorrelation")
+    ax_acf.grid(True, linestyle=':', alpha=0.7)
+    
+    # The acorr function plots negative lags too; limit to positive for standard view
+    ax_acf.set_xlim([0, lags]) 
+    
+    # ---------------------------------------------------------
+    # Plot 2: Distribution & Chi-Squared Test
+    # ---------------------------------------------------------
+    ax_dist = axes[1]
+    
+    # Calculate sample statistics
+    mu, std = np.mean(res), np.std(res)
+    
+    # Create bins and calculate observed frequencies
+    observed_freq, bin_edges = np.histogram(res, bins=num_bins)
+    
+    # Calculate expected frequencies using the Normal CDF over the bins
+    cdf_values = stats.norm.cdf(bin_edges, loc=mu, scale=std)
+    expected_prob = np.diff(cdf_values)
+    expected_freq = expected_prob * N
+    
+    # Normalize expected frequencies to exactly match the sum of observed 
+    # (Required by scipy.stats.chisquare to prevent floating point assertion errors)
+    expected_freq = expected_freq * (observed_freq.sum() / expected_freq.sum())
+    
+    # Chi-Squared Test
+    # ddof=2 because we estimated 2 parameters (mu, std) from the sample data
+    chi2_stat, p_val = stats.chisquare(f_obs=observed_freq, f_exp=expected_freq, ddof=2)
+    
+    # Plot Observed Histogram
+    ax_dist.hist(res, bins=bin_edges, density=True, alpha=0.6, color='gray', 
+                 edgecolor='black', label='Observed Residuals')
+    
+    # Plot Theoretical Normal PDF
+    x_pdf = np.linspace(bin_edges[0], bin_edges[-1], 200)
+    y_pdf = stats.norm.pdf(x_pdf, mu, std)
+    ax_dist.plot(x_pdf, y_pdf, 'r-', lw=2, label=f'Normal PDF ($\mu$={mu:.2f}, $\sigma$={std:.2f})')
+    
+    # Annotate with Chi-Squared Results
+    stat_text = f"$\chi^2$ Stat: {chi2_stat:.2f}\np-value: {p_val:.4e}"
+    ax_dist.text(0.95, 0.95, stat_text, transform=ax_dist.transAxes, 
+                 fontsize=11, verticalalignment='top', horizontalalignment='right',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    ax_dist.set_title("Residual Distribution & $\chi^2$ Test")
+    ax_dist.set_xlabel("Residual Magnitude (Hz)")
+    ax_dist.set_ylabel("Density")
+    ax_dist.legend(loc='upper left')
+    ax_dist.grid(True, linestyle=':', alpha=0.7)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return chi2_stat, p_val

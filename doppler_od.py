@@ -10,8 +10,9 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import load_gmat_csv_block, unix_to_mjd
-from diffod.visualize import plot_calibrated_doppler
+from diffod.visualize import plot_calibrated_doppler, plot_residual_diagnostics
 from diffod.solvers.gn_svd import svd_solve
+
 
 # ---------------------------------------------------------
 # Custom Wrapper to bridge SGP4 and Time Biases
@@ -67,9 +68,9 @@ tle0_base = TLE(data=TLE_list)
 
 # Load Ground Truth GPS
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/AWS_long_period.csv",
+    file_path="data/AWS_full_long_period.csv",
     tle_epoch_unix=epoch_unix,
-    block_sec=86400 * 0.5,
+    block_sec=86400 * 2,
 )
 
 
@@ -240,3 +241,6 @@ plot_calibrated_doppler(
     doppler_pred=doppler_pred, 
     contacts=contacts
 )
+
+residuals = doppler_obs - doppler_pred
+plot_residual_diagnostics(residuals)
