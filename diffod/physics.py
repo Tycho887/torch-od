@@ -38,7 +38,7 @@ def compute_range(sat_pos, st_pos) -> torch.Tensor:
 
 
 def apply_linear_bias(
-    predictions: torch.Tensor, x_state: torch.Tensor, bias_group: BiasGroup, scaling: float = 1e3
+    predictions: torch.Tensor, x_state: torch.Tensor, bias_group: BiasGroup, scaling: float = 1
 ) -> torch.Tensor:
     if bias_group is None:
         return predictions

@@ -53,7 +53,7 @@ class MeasurementPipeline(nn.Module):
     ) -> torch.Tensor:
         
         # 1. Source (Get coordinates)
-        sat_pos, sat_vel = self.propagator(x, tsince/60)
+        sat_pos, sat_vel = self.propagator(x, tsince/60)#/60)
         
         # 2. Sink (Measure)
         # Pass the state, ephemeris, and any measurement-specific arguments

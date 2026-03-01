@@ -261,8 +261,8 @@ class CalibrationSSV(BaseSSV):
         # Define physical scales. 
         # A value of 1.0 in the optimizer's state vector maps to these physical magnitudes.
         self.scales = {
-            "time_offset": 10.0,    # 1.0 state unit = 10.0 seconds
-            "freq_offset": 1000.0,  # 1.0 state unit = 1000.0 Hz
+            "time_offset": 1.0,    # 1.0 state unit = 10.0 seconds
+            "freq_offset": 1.0,  # 1.0 state unit = 1000.0 Hz
         }
 
     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
@@ -289,6 +289,6 @@ class CalibrationSSV(BaseSSV):
             
             # Since apply_linear_bias in physics.py defaults to scaling=1e3 (1000 Hz),
             # we multiply the state by 1000.0 to export the true Hz value.
-            output["pass_biases"] = (x[start:end] * 1000.0).detach().cpu().numpy().tolist()
+            output["pass_biases"] = (x[start:end]).detach().cpu().numpy().tolist()
             
         return output

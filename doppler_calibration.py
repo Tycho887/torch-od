@@ -9,7 +9,7 @@ from astropy.time import Time
 
 import diffod.state as state
 import diffod.functional.system as system
-from diffod.utils import load_gmat_csv_block, unix_to_mjd
+from diffod.utils import load_gmat_csv_block_legacy, unix_to_mjd
 from diffod.visualize import plot_calibrated_doppler, plot_residual_diagnostics, plot_pass_biases
 from diffod.solvers.gn_svd import svd_solve
 
@@ -43,8 +43,8 @@ class CalibratedSGP4(torch.nn.Module):
             total_time_offset = total_time_offset + pass_offsets
 
         # Apply bias and convert to minutes for SGP4
-        t_eval_sec = tsince_sec + total_time_offset
-        t_eval_min = t_eval_sec / 60.0
+        t_eval_sec = tsince_sec + total_time_offset / 60
+        t_eval_min = t_eval_sec #/ 60.0
         
         return self.sgp4(x, t_eval_min)
 
@@ -67,7 +67,7 @@ epoch_unix = 1762207191
 tle0_base = TLE(data=TLE_list)
 
 # Load Ground Truth GPS
-t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
+t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block_legacy(
     file_path="data/AWS_full_long_period.csv",
     tle_epoch_unix=epoch_unix,
     block_sec=86400 * 2,
@@ -123,7 +123,7 @@ meas_model_orbit = system.CartesianMeasurement(ssv=ssv_orbit)
 pipeline_orbit = system.MeasurementPipeline(propagator=propagator_orbit, measurement_model=meas_model_orbit)
 
 gps_obs_1d = meas_model_orbit.format_gps_observations(r_gps=r_gps, v_gps=v_gps)
-t_since_mins_gps = (t_gps - T_mean) / 60.0
+t_since_mins_gps = (t_gps - T_mean) #/ 60.0
 
 def functional_forward_orbit(x) -> torch.Tensor:
     return pipeline_orbit(x=x, tsince=t_since_mins_gps)
@@ -249,7 +249,7 @@ plot_calibrated_doppler(
 bg_freq = ssv_calib.get_bias_group("pass_freq_bias")
 bg_time = ssv_calib.get_bias_group("pass_time_bias")
 
-freq_biases_hz = x_calib_out[bg_freq.global_offset : bg_freq.global_offset + bg_freq.num_params] * 1000.0
+freq_biases_hz = x_calib_out[bg_freq.global_offset : bg_freq.global_offset + bg_freq.num_params] #* 1000.0
 time_biases_sec = x_calib_out[bg_time.global_offset : bg_time.global_offset + bg_time.num_params]
 
 # Plot the biases
