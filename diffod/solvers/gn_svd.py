@@ -13,7 +13,9 @@ def solve_gn_step_svd(
     Direct SVD-based least squares solver to handle severe collinearity.
     """
     r = y_obs - y_model
-    print(f"RMSE: {torch.sqrt(input=torch.mean(input=r**2)).detach().item():.6f}")
+    # print(y_model)
+    # print(f"Observation mean: {torch.mean(input=y_obs):.6f}, Model mean: {torch.mean(input=y_model):.6f}")
+    # print(f"RMSE: {torch.sqrt(input=torch.mean(input=r**2)).detach().item():.6f}")
     
     Jw = J * sqrt_w
     rw = r * sqrt_w
@@ -36,6 +38,8 @@ def solve_gn_step_svd(
     Jn_pinv = torch.linalg.pinv(Jn, rcond=rcond)
     P_cov = (Jn_pinv @ Jn_pinv.T) / (col_norms[:, None] @ col_norms[None, :])
     
+    # print(dx)
+
     return dx, P_cov
 
 def svd_solve(
@@ -60,6 +64,9 @@ def svd_solve(
     for _ in range(num_steps):
         # 1. Compute Model and Jacobian
         y_model = forward_fn(x)
+
+        print(x)
+
         # Jacobian wrt full state x
         J_full = jacfwd(forward_fn)(x)
         

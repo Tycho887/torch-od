@@ -148,13 +148,13 @@ class TLE_SSV(BaseSSV):
 class MEE_SSV(BaseSSV):
     def __init__(self, init_tle: TLE, num_measurements: int, **fit_kwargs) -> None:
         orbital_flags = [
-            ("n", fit_kwargs.get("fit_mean_motion", False)),
-            ("f", fit_kwargs.get("fit_f", False)),
-            ("g", fit_kwargs.get("fit_g", False)),
-            ("h", fit_kwargs.get("fit_h", False)),
-            ("k", fit_kwargs.get("fit_k", False)),
-            ("L", fit_kwargs.get("fit_L", False)),
-            ("bstar", fit_kwargs.get("fit_bstar", False)),
+            ("n", fit_kwargs.get("fit_mean_motion", True)),
+            ("f", fit_kwargs.get("fit_f", True)),
+            ("g", fit_kwargs.get("fit_g", True)),
+            ("h", fit_kwargs.get("fit_h", True)),
+            ("k", fit_kwargs.get("fit_k", True)),
+            ("L", fit_kwargs.get("fit_L", True)),
+            ("bstar", fit_kwargs.get("fit_bstar", True)),
             ("ndot", fit_kwargs.get("fit_ndot", False)),
             ("nddot", fit_kwargs.get("fit_nddot", False)),
         ]
@@ -167,12 +167,12 @@ class MEE_SSV(BaseSSV):
         
         with torch.no_grad():
             # 1. Cast TLE floats to tensors for the transformation block
-            n = torch.tensor(self.init_tle._no_kozai, device=device)
-            e = torch.tensor(self.init_tle._ecco, device=device)
-            i = torch.tensor(self.init_tle._inclo, device=device)
-            omega = torch.tensor(self.init_tle._argpo, device=device)
-            raan = torch.tensor(self.init_tle._nodeo, device=device)
-            m = torch.tensor(self.init_tle._mo, device=device)
+            n = self.init_tle._no_kozai.detach().clone()#torch.tensor(self.init_tle._no_kozai.detach().numpy()), device=device)
+            e = self.init_tle._ecco.detach().clone()#torch.tensor(self.init_tle._ecco, device=device)
+            i = self.init_tle._inclo.detach().clone()#torch.tensor(self.init_tle._inclo, device=device)
+            omega = self.init_tle._argpo.detach().clone()#torch.tensor(self.init_tle._argpo, device=device)
+            raan = self.init_tle._nodeo.detach().clone()#torch.tensor(self.init_tle._nodeo, device=device)
+            m = self.init_tle._mo.detach().clone()#torch.tensor(self.init_tle._mo, device=device)
 
             # 2. Transform
             mee_dict = transform_tle_to_mee(n, e, i, omega, raan, m)

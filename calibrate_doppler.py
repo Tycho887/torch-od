@@ -94,7 +94,7 @@ station_model = DifferentiableStation(
 # Define State Vector
 ssv = CalibrationSSV(
     num_measurements=N_samples, 
-    fit_time_offset=True, 
+    fit_time_offset=False, 
     fit_frequency_offset=False,
 )
 

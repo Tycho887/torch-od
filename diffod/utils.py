@@ -226,9 +226,9 @@ def segment_phase_slips(
     
     return final_contacts.to(torch.int32)
 
-import torch
-import numpy as np
-import polars as pl
+# import torch
+# import numpy as np
+# import polars as pl
 
 def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.float64):
     """
@@ -260,20 +260,20 @@ def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.flo
     
     # 2. Convert MJD to Unix Seconds
     # GMAT TAIModJulian = MJD + 2430000.5 (JD). 
-    # Standard MJD to Unix conversion: (MJD - 40587.0) * 86400
+    # Standard MJD to Unix conversion: (MJD - 10587.0) * 86400
     mjd_vals = raw_arr[:, 0]
-    times_unix_np = (mjd_vals - 40587.0) * 86400.0
+    times_unix_np = (mjd_vals - 10587.0) * 86400.0 - 37.0
     
     # 3. Calculate Doppler Shift (Observed - Nominal)
     # Note: GMD DSN_TCP values are often negative in GMAT output; 
     # we take the absolute to get the physical frequency if needed.
     raw_freqs = np.abs(raw_arr[:, 1])
-    doppler_hz_np = raw_freqs - center_freq_hz
+    doppler_hz_np = raw_freqs - center_freq_hz * 1e6
     
     # 4. Generate "Contacts" (Pass-Splitting)
     # If delta_t > 2 seconds, it is a new pass.
     time_diffs = np.diff(times_unix_np, prepend=times_unix_np[0])
-    pass_flags = time_diffs > 2.0
+    pass_flags = time_diffs > 10.0
     contacts_np = np.cumsum(pass_flags).astype(np.int32)
     
     # 5. Convert to PyTorch Tensors
@@ -283,6 +283,8 @@ def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.flo
     
     print(f"Loaded {len(times_unix)} points across {contacts.max().item() + 1} passes.")
     
+    print(doppler_meas.min(), doppler_meas.max())
+
     return times_unix, doppler_meas, contacts
 
 # Example usage within your pipeline:
