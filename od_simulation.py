@@ -10,7 +10,8 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import unix_to_mjd, load_gmat_csv_block
-from diffod.visualize import compute_ric_residuals, plot_ric_residuals, plot_calibrated_doppler
+from diffod.visualize import compute_ric_residuals, plot_ric_residuals, plot_calibrated_doppler, print_ric_residual_summary
+# from diffod.visualize import compute_ric_residuals, plot_ric_residuals, plot_calibrated_doppler, print_ric_residual_summary
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.gaussNewton import wgn_solve
 
@@ -27,24 +28,24 @@ center_freq = 2200.0  # Matches your simulated 2200 MHz center frequency [cite: 
 # Initial TLE Guess (Standard AWS/InnoSat TLE)
 TLE_list = [
     "AWS",
-    "1 60543U 24149CD  25013.99964120  .00000000  00000-0 -14968-3 0    15",
-    "2 60543  97.8099  12.7154 0011350 253.1192 214.6960 14.91380512 65806",
+    "1 60543U 24149CD  25307.42878472  .00000000  00000-0  11979-3 0    11",
+    "2 60543  97.7067  19.0341 0003458 123.1215 316.4897 14.89807169 65809",
 ]
 tle_base = TLE(data=TLE_list)
 
 print("Loading Simulated Data...")
 # Load GPS Truth (From your AWS_simulated.csv)
 t_gps, r_gps, v_gps = load_gmat_csv_block(
-    file_path="data/AWS_simulated.csv", 
-    tle_epoch_unix=1735863190.0, # Jan 01 2025 12:00:00 [cite: 1]
-    block_sec=86400*1
+    file_path="data/AWS_ideal_simulated.csv", 
+    tle_epoch_unix=1735862400.0, # Jan 01 2025 12:00:00 [cite: 1]
+    block_sec=86400*0.5
 )
 
 
 
 # Load Doppler Telemetry (From your GMAT .gmd file)
 t_dopp, d_dopp, c_dopp = load_gmd_to_tensors(
-    file_path="data/AWS_Svalbard_sim.gmd", 
+    file_path="data/AWS_Svalbard_ideal_sim.gmd", 
     center_freq_hz=center_freq, 
     device="cpu"
 )
@@ -60,7 +61,7 @@ print(f"Filtered to GPS window: {len(t_dopp)} valid samples remain.")
 print(f"Unique passes: {len(torch.unique(c_dopp))}")
 
 # Define Central Epoch for the Batch
-T_mean = 1735863190 #float(torch.mean(t_gps))
+T_mean = float(torch.mean(t_gps))
 t_ref_astropy = Time(T_mean, format="unix", scale="utc")
 
 # ---------------------------------------------------------
@@ -69,13 +70,13 @@ t_ref_astropy = Time(T_mean, format="unix", scale="utc")
 print("\n--- Phase 1: Fitting TLE to GPS ---")
 init_tle_gps, _ = dsgp4.newton_method(tle_base, unix_to_mjd(T_mean))
 
-ssv_gps = state.MEE_SSV(init_tle=init_tle_gps, num_measurements=len(t_gps))
+ssv_gps = state.MEE_SSV(init_tle=init_tle_gps, num_measurements=len(t_gps), fit_bstar=False)
 prop_gps = system.SGP4(ssv=ssv_gps)
 meas_gps = system.CartesianMeasurement(ssv=ssv_gps)
 pipe_gps = system.MeasurementPipeline(propagator=prop_gps, measurement_model=meas_gps)
 
 y_gps_1d = meas_gps.format_gps_observations(r_gps, v_gps)
-t_since_gps = (t_gps - T_mean) / 60.0
+t_since_gps = (t_gps - T_mean) #/ 60.0
 
 x_gps_out, _ = svd_solve(
     x_init=ssv_gps.get_initial_state(),
@@ -98,10 +99,10 @@ tle_perturbed = ssv_gps.export(x_perturbed)
 print("\n--- Phase 2: Doppler-Only OD ---")
 # Use a perturbed version of the GPS-fit TLE to simulate an OD start
 ssv_dopp = state.MEE_SSV(init_tle=tle_perturbed, num_measurements=len(t_dopp),
-                         fit_mean_motion=True, fit_f=False, fit_g=False,
-                         fit_h=True, fit_k=True, fit_L=True, fit_bstar=False)
+                         fit_mean_motion=False, fit_f=False, fit_g=False,
+                         fit_h=False, fit_k=False, fit_L=False, fit_bstar=False)
 
-ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
+# ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
 
 station = system.DifferentiableStation(
     lat_deg=78.23, lon_deg=15.39, alt_m=450, # Svalbard [cite: 1]
@@ -110,11 +111,11 @@ station = system.DifferentiableStation(
 )
 
 prop_dopp = system.SGP4(ssv=ssv_dopp)
-meas_dopp = system.DopplerMeasurement(ssv=ssv_dopp, station_model=station,
-                                          freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"))
+meas_dopp = system.DopplerMeasurement(ssv=ssv_dopp, station_model=station)
+                                        #   freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"))
 pipe_dopp = system.MeasurementPipeline(propagator=prop_dopp, measurement_model=meas_dopp)
 
-t_since_dopp = (t_dopp - T_mean) / 60.0
+t_since_dopp = (t_dopp - T_mean) #/ 60.0
 
 x_dopp_out, _ = wgn_solve(
     x_init=ssv_dopp.get_initial_state(),
@@ -124,18 +125,22 @@ x_dopp_out, _ = wgn_solve(
     estimate_mask=ssv_dopp.get_active_map(),
     num_steps=8
 )
-tle_dopp_fit = ssv_dopp.export(x_dopp_out)
-
 # ---------------------------------------------------------
 # 3. Comparison & Visualization
 # ---------------------------------------------------------
 print("\n--- Final Results Comparison ---")
-print(f"GPS-Fit TLE:\n{tle_gps_fit}")
-print(f"Doppler-Fit TLE:\n{tle_dopp_fit}")
 
-# Compute RIC Residuals against GPS Truth
+# Export and print both TLEs
+print(f"GPS-Fit TLE:\n{tle_gps_fit}\n")
+tle_dopp_fit = ssv_dopp.export(x_dopp_out)
+print(f"Doppler-Fit TLE:\n{tle_dopp_fit}\n")
+
+
+# Compute RIC Residuals against GPS Truth for BOTH fits
 results_ric = {}
-for name, state_vec in [("GPS-Fit", x_gps_out)]:#, ("Doppler-Fit", x_dopp_out)]:
+
+# We iterate over both optimized state vectors
+for name, state_vec in [("GPS-Fit", x_gps_out), ("Doppler-Fit", x_dopp_out)]:
     _, pos_err, vel_err = compute_ric_residuals(
         x_state=state_vec, 
         propagator=prop_gps, # SGP4 propagator 
@@ -144,8 +149,11 @@ for name, state_vec in [("GPS-Fit", x_gps_out)]:#, ("Doppler-Fit", x_dopp_out)]:
     )
     results_ric[name] = (pos_err, vel_err)
 
+# Print the RMS summary to the console
+print_ric_residual_summary(results_ric)
+
 # Plot RIC Comparison
-t_plot = (t_gps - T_mean) / 60.0
+t_plot = (t_gps - T_mean) #/ 60.0
 plot_ric_residuals(t_plot, results_ric)
 
 # Plot Doppler Curves

@@ -24,7 +24,7 @@ TLE_list = [
 
 dtype = torch.float64
 
-epoch = 1736769569.1462152#1762508742
+epoch = 1735862400.1462152#1762508742
 tle0_base = TLE(data=TLE_list)
 
 target_device = torch.device("cpu")
@@ -32,9 +32,9 @@ target_device = torch.device("cpu")
 print("Loading GPS Data...")
 # Load real GPS telemetry data at the beginning of the script
 t_gps_raw, r_gps_raw, v_gps_raw = load_gmat_csv_block(
-    file_path="data/AWS_simulated.csv",
+    file_path="data/AWS_ideal_simulated.csv",
     tle_epoch_unix=epoch,
-    block_sec=1*86400, 
+    block_sec=0.5*86400, 
 )
 
 epoch = float(torch.mean(input=t_gps_raw))
@@ -49,7 +49,7 @@ r_gps = r_gps_raw.to(device=target_device, dtype=dtype) #/ 1e3
 v_gps = v_gps_raw.to(device=target_device, dtype=dtype) #/ 1e3
 
 N_samples = len(t_gps)
-t_since_mins = (t_gps - epoch) / 60.0
+t_since = (t_gps - epoch) #/ 60.0
 
 ssv = state.MEE_SSV(
     init_tle=init_tle,
@@ -60,7 +60,7 @@ ssv = state.MEE_SSV(
     fit_h=True,            # tan(i/2) * cos(raan)
     fit_k=True,            # tan(i/2) * sin(raan)
     fit_L=True,            # raan + omega + M
-    fit_bstar=True,
+    fit_bstar=False,
 )
 
 # --- CARTESIAN MODULAR PIPELINE ---
@@ -78,7 +78,7 @@ gps_obs_1d = measurement_model.format_gps_observations(r_gps=r_gps, v_gps=v_gps)
 
 def functional_forward(x) -> torch.Tensor:
     # No station pos/vel or center_freq needed for Cartesian
-    return model(x=x, tsince=t_since_mins)
+    return model(x=x, tsince=t_since)
 
 # ---------------------------------------------------------
 # 3. Generate Perturbed Starts for Monte Carlo
