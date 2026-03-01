@@ -229,7 +229,7 @@ freq_biases_hz = x_calib_out[bg_freq.global_offset : bg_freq.global_offset + bg_
 time_biases_sec = x_calib_out[bg_time.global_offset : bg_time.global_offset + bg_time.num_params]
 
 for i in range(len(freq_biases_hz)):
-    print(f"Pass {i:02d} | Freq Offset: {freq_biases_hz[i]:8.2f} Hz | Time Offset: {time_biases_sec[i]:6.3f} sec")
+    print(f"Pass {i:02d} | Freq Offset: {freq_biases_hz[i]*1e-3:8.2f} Hz | Time Offset: {time_biases_sec[i]:6.3f} sec")
 
 print("\nGenerating Doppler curve plots...")
 with torch.no_grad():

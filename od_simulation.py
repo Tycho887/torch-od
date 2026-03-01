@@ -37,7 +37,7 @@ print("Loading Simulated Data...")
 # Load GPS Truth (From your AWS_simulated.csv)
 t_gps, r_gps, v_gps = load_gmat_csv_block(
     file_path="data/AWS_ideal_simulated.csv", 
-    tle_epoch_unix=1735862400.0, # Jan 01 2025 12:00:00 [cite: 1]
+    tle_epoch_unix=1735862400.0, # Jan 01 2025 12:00:00
     block_sec=86400*0.5
 )
 
