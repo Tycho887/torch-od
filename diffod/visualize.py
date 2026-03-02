@@ -407,3 +407,44 @@ def compare_doppler_models(
     
     plt.tight_layout()
     plt.show()
+
+def plot_uncertainty_bounds(t_gps, ensemble_ric, std_analytical):
+    """
+    Plots the Monte Carlo empirical spread against the Jacobian-propagated analytical bounds.
+    """
+    print("\n--- Plotting 3D Confidence Bounds ---")
+    t_plot_mins = (t_gps - t_gps[0]).cpu().numpy() / 60.0
+    
+    # Calculate Empirical MC stats
+    mean_mc = torch.mean(ensemble_ric, dim=0).cpu().numpy()
+    std_mc = torch.std(ensemble_ric, dim=0).cpu().numpy()
+    
+    std_ana = std_analytical.cpu().numpy()
+    
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    labels = ['Radial', 'In-track', 'Cross-track']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+    
+    for i in range(3):
+        ax = axes[i]
+        # 1. Plot the MC Mean (Residual bias)
+        ax.plot(t_plot_mins, mean_mc[:, i], color=colors[i], label='MC Mean Residual', linewidth=1.5)
+        
+        # 2. Plot the MC Empirical Spread (+/- 3 Sigma Blob)
+        ax.fill_between(t_plot_mins, 
+                        mean_mc[:, i] - 3*std_mc[:, i], 
+                        mean_mc[:, i] + 3*std_mc[:, i], 
+                        color=colors[i], alpha=0.25, label=r'MC $\pm 3\sigma$ (Empirical)')
+        
+        # 3. Overlay the Analytical Bounds (Centered around the mean for direct spread comparison)
+        ax.plot(t_plot_mins, mean_mc[:, i] + 3*std_ana[:, i], color='black', linestyle='--', linewidth=1.5, label=r'Analytical $\pm 3\sigma$ (Jacobian)')
+        ax.plot(t_plot_mins, mean_mc[:, i] - 3*std_ana[:, i], color='black', linestyle='--', linewidth=1.5)
+        
+        ax.set_ylabel(f'{labels[i]} Error (km)')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right')
+
+    axes[-1].set_xlabel('Time since start (minutes)')
+    plt.suptitle('Orbit Determination Uncertainty: Empirical Monte Carlo vs. Analytical Jacobian', fontsize=14)
+    plt.tight_layout()
+    plt.show()
