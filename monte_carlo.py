@@ -131,7 +131,7 @@ def evaluate_forecast_metrics(
     epoch_unix: float, 
     t_end_obs: float
 ) -> dict[str, float]:
-    """Computes 3D RMSE for specific prediction horizons past the last observation."""
+    """Computes 3D and decomposed RIC RMSE for prediction horizons."""
     metrics = {}
     horizons = [(1, '1h'), (6, '6h'), (24, '24h')]
     
@@ -140,6 +140,9 @@ def evaluate_forecast_metrics(
         
         if mask.sum() == 0:
             metrics[label] = np.nan
+            metrics[f'{label}_R'] = np.nan
+            metrics[f'{label}_I'] = np.nan
+            metrics[f'{label}_C'] = np.nan
             continue
             
         _, pos_ric, _ = compute_ric_residuals(
@@ -148,9 +151,14 @@ def evaluate_forecast_metrics(
             tle_epoch_unix=epoch_unix
         )
         
-        # Calculate full 3D RMSE: sqrt(mean(dx^2 + dy^2 + dz^2))
-        rms_3d = torch.sqrt(torch.mean(torch.sum(pos_ric**2, dim=1))).item()
-        metrics[label] = rms_3d
+        # Calculate full 3D RMSE
+        metrics[label] = torch.sqrt(torch.mean(torch.sum(pos_ric**2, dim=1))).item()
+        
+        # Decompose into Radial (0), In-track (1), and Cross-track (2) RMSE
+        rms_ric = torch.sqrt(torch.mean(pos_ric**2, dim=0))
+        metrics[f'{label}_R'] = rms_ric[0].item()
+        metrics[f'{label}_I'] = rms_ric[1].item()
+        metrics[f'{label}_C'] = rms_ric[2].item()
         
     return metrics
 
@@ -225,7 +233,7 @@ print("\n--- Phase 2: Multi-Dimensional Epoch-Centered Simulation ---")
 data_chunks = create_pass_chunks(t_dopp, d_dopp_true, c_dopp, passes_per_chunk=6, num_chunks=4)
 passes_to_test = [0, 1, 2, 3, 4, 5, 6]  # Added 0 to the test list
 experiment_results = []
-
+segment_ric_trajectories = {}
 for chunk in data_chunks:
     print(f"\nProcessing Dataset Chunk {chunk['chunk_id']}...")
     
@@ -264,6 +272,9 @@ for chunk in data_chunks:
                 "1h_rmse": metrics.get('1h', np.nan),
                 "6h_rmse": metrics.get('6h', np.nan),
                 "24h_rmse": metrics.get('24h', np.nan),
+                "24h_R": np.nanmean(metrics['24h_R']),
+                "24h_I": np.nanmean(metrics['24h_I']),
+                "24h_C": np.nanmean(metrics['24h_C']),
                 "cov_frob": np.nan  # No covariance exists before OD
             })
             
@@ -300,6 +311,21 @@ for chunk in data_chunks:
                 x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
                 ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC
             )
+
+            if num_passes == 6 and i == 0:
+                # Create a mask for the 24 hours immediately following this segment's epoch
+                t_forecast_mask = (t_gps >= t_mean_window) & (t_gps <= t_mean_window + 24 * 3600)
+                
+                # Compute the residuals for this specific window
+                t_mins, pos_ric, vel_ric = compute_ric_residuals(
+                    x_state=x_mc_out, 
+                    propagator=prop_mc,
+                    t_gps=t_gps[t_forecast_mask], 
+                    r_gps=r_gps[t_forecast_mask], 
+                    v_gps=v_gps[t_forecast_mask],
+                    tle_epoch_unix=t_mean_window
+                )
+                segment_ric_trajectories[f"Segment {chunk['chunk_id']}"] = (t_mins, pos_ric, vel_ric)
             
             mc_metrics['frob'].append(torch.sum(torch.diag(cov_mc)[:2]).item())
             
@@ -361,3 +387,46 @@ def plot_cross_validation(results: list[dict]):
 
 # Execute plotting
 plot_cross_validation(experiment_results)
+
+def plot_segment_ric_residuals(
+    segment_results_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+):
+    """
+    Plots the RIC position and velocity errors for different dataset segments.
+    Expects segment_results_dict to map 'Segment Name' -> (t_mins, pos_ric, vel_ric).
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
+    components = ['Radial', 'Along-track', 'Cross-track']
+    
+    # Use a standard colormap to dynamically handle any number of segments
+    colors = plt.cm.tab10.colors 
+
+    for idx, (name, (t_mins, pos_ric, vel_ric)) in enumerate(segment_results_dict.items()):
+        pos_np = pos_ric.detach().cpu().numpy()
+        vel_np = vel_ric.detach().cpu().numpy()
+        
+        # Convert minutes to hours for easier reading on a 24h forecast
+        t_plot_hours = t_mins.detach().cpu().numpy() / 60.0 
+        
+        style = {"color": colors[idx % len(colors)], "linestyle": "-", "alpha": 0.8, "linewidth": 2}
+
+        for i in range(3):
+            axes[0, i].plot(t_plot_hours, pos_np[:, i], label=name, **style)
+            axes[1, i].plot(t_plot_hours, vel_np[:, i], label=name, **style)
+
+    for i, comp in enumerate(components):
+        axes[0, i].set_title(f'{comp} Error')
+        axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
+        axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
+        axes[1, i].set_xlabel('Time Since Fit Epoch (Hours)')
+        
+        for row in range(2):
+            axes[row, i].grid(True, linestyle=':', alpha=0.7)
+            if i == 0 and row == 0:
+                axes[row, i].legend(loc='upper left')
+
+    plt.suptitle('6-Pass Estimator: 24-Hour RIC Residuals Post-Fit', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+plot_segment_ric_residuals(segment_ric_trajectories)
