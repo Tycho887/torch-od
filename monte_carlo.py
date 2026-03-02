@@ -21,7 +21,7 @@ dtype = torch.float64
 center_freq = 1707.0  
 
 KNOWN_GLOBAL_TIME_BIAS_SEC = 0.277  
-MC_ITERATIONS = 2
+MC_ITERATIONS = 1
 STATE_NOISE_SCALE = 1e-4          
 DOPPLER_NOISE_STD_HZ = 5.0       
 
@@ -223,13 +223,56 @@ tle_gps_fit = ssv_gps.export(x_gps_out)
 print("\n--- Phase 2: Multi-Dimensional Epoch-Centered Simulation ---")
 
 data_chunks = create_pass_chunks(t_dopp, d_dopp_true, c_dopp, passes_per_chunk=6, num_chunks=4)
-passes_to_test = [1, 2, 3, 4, 5, 6]
+passes_to_test = [0, 1, 2, 3, 4, 5, 6]  # Added 0 to the test list
 experiment_results = []
 
 for chunk in data_chunks:
     print(f"\nProcessing Dataset Chunk {chunk['chunk_id']}...")
     
     for num_passes in passes_to_test:
+        
+        # ==========================================
+        # BASELINE (0-PASS) LOGIC
+        # ==========================================
+        if num_passes == 0:
+            # Use the first pass to establish a baseline epoch and end-time
+            active_pass_ids = chunk["pass_ids"][:1]
+            pass_mask = torch.isin(chunk["c"], active_pass_ids)
+            t_active = chunk["t"][pass_mask]
+            
+            t_mean_window = float(torch.mean(t_active))
+            t_end_window = float(t_active[-1])
+            
+            # Center the global GPS TLE to this specific window
+            tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+            
+            # Setup a baseline SSV and propagator (no measurement tracking needed)
+            baseline_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=1, fit_mean_motion=False)
+            prop_baseline = system.SGP4(ssv=baseline_ssv)
+            
+            # Evaluate the prior state
+            metrics = evaluate_forecast_metrics(
+                x_state=baseline_ssv.get_initial_state(), 
+                propagator=prop_baseline,
+                t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+                epoch_unix=t_mean_window, t_end_obs=t_end_window
+            )
+            
+            experiment_results.append({
+                "chunk_id": chunk["chunk_id"],
+                "num_passes": 0,
+                "1h_rmse": metrics.get('1h', np.nan),
+                "6h_rmse": metrics.get('6h', np.nan),
+                "24h_rmse": metrics.get('24h', np.nan),
+                "cov_frob": np.nan  # No covariance exists before OD
+            })
+            
+            print(f"  -> Passes: 0 | 1h RMSE: {metrics.get('1h', np.nan):.2f} km | 24h RMSE: {metrics.get('24h', np.nan):.2f} km (Baseline)")
+            continue
+
+        # ==========================================
+        # OD (>0 PASS) LOGIC
+        # ==========================================
         active_pass_ids = chunk["pass_ids"][:num_passes]
         pass_mask = torch.isin(chunk["c"], active_pass_ids)
         
@@ -237,7 +280,7 @@ for chunk in data_chunks:
         d_active_true = chunk["d_true"][pass_mask]
         c_active = chunk["c"][pass_mask]
         
-        # 1. Shift the reference epoch to the center of this specific observation window
+        # 1. Shift the reference epoch
         t_mean_window = float(torch.mean(t_active))
         t_end_window = float(t_active[-1])
         tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
@@ -258,10 +301,8 @@ for chunk in data_chunks:
                 ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC
             )
             
-            # Record Frobenius Norm of Covariance
-            mc_metrics['frob'].append(torch.linalg.matrix_norm(cov_mc, ord='fro').item())
+            mc_metrics['frob'].append(torch.sum(torch.diag(cov_mc)[:2]).item())
             
-            # Evaluate Forecast
             metrics = evaluate_forecast_metrics(
                 x_state=x_mc_out, propagator=prop_mc,
                 t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
@@ -270,7 +311,6 @@ for chunk in data_chunks:
             for k in ['1h', '6h', '24h']:
                 mc_metrics[k].append(metrics[k])
                 
-        # Aggregate MC metrics into the final output
         experiment_results.append({
             "chunk_id": chunk["chunk_id"],
             "num_passes": num_passes,
