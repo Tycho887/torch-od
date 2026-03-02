@@ -19,7 +19,10 @@ device = torch.device(device="cpu")
 dtype = torch.float64
 center_freq = 1707.0  # MHz, matching the synthetic dataset base_freq
 
-# Initial TLE Guess (Matches the generation script)
+# IMPORTANT: Plug in the global mean time bias calculated from simulate.py
+known_global_time_bias_sec = 0.277
+
+# Initial TLE Guess
 TLE_list = [
     "AWS",
     "1 60543U 24149CD  25307.42878472  .00000000  00000-0  11979-3 0    11",
@@ -30,21 +33,19 @@ epoch_unix = 1762207191
 
 print("Loading Synthetic Dataset & GPS Truth...")
 
-# Load GPS Truth (From legacy CSV format used in generation)
+# Load GPS Truth
 t_gps, r_gps, v_gps = load_gmat_csv_block_legacy(
     file_path="data/AWS_full_long_period.csv", 
     tle_epoch_unix=epoch_unix,
     block_sec=86400 * 2
 )
 
-# Load Synthetic Doppler Telemetry (From Parquet)
+# Load Synthetic Doppler Telemetry
 synthetic_telemetry = pl.read_parquet("data/synthetic_period_telemetry.parquet")
 
 t_dopp = torch.tensor(synthetic_telemetry["timestamp"].to_numpy(), dtype=dtype, device=device)
 d_dopp = torch.tensor(synthetic_telemetry["Doppler_Hz"].to_numpy(), dtype=dtype, device=device)
 c_dopp = torch.tensor(synthetic_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=device)
-
-print(f"Mean doppler time: {torch.mean(t_dopp)}")
 
 # Filter to GPS window
 valid_mask = (t_dopp >= t_gps.min()) & (t_dopp <= t_gps.max())
@@ -81,7 +82,7 @@ x_gps_out, _ = svd_solve(
     forward_fn=lambda x: pipe_gps(x=x, tsince=t_since_gps),
     estimate_mask=ssv_gps.get_active_map(),
     num_steps=5,
-    sigma_obs=1.0 # Adjusted to 1.0 based on calibration script defaults
+    sigma_obs=1.0 
 )
  
 tle_gps_fit = ssv_gps.export(x_gps_out)
@@ -91,19 +92,19 @@ tle_gps_fit = ssv_gps.export(x_gps_out)
 # ---------------------------------------------------------
 print("\n--- Phase 2: Doppler-Only OD ---")
 
-# We use the GPS-fit TLE as the starting point, but now we set the fit flags 
-# to True so the solver actually optimizes the orbit based on Doppler.
+# Isolate high-observability parameters: Mean Motion (n) and Mean Longitude (L)
 ssv_dopp = state.MEE_SSV(
     init_tle=tle_gps_fit, 
     num_measurements=len(t_dopp),
-    fit_mean_motion=True, fit_f=True, fit_g=True,
-    fit_h=True, fit_k=True, fit_L=True, fit_bstar=False
+    fit_mean_motion=True, 
+    fit_f=False, fit_g=False,  # Freeze eccentricity
+    fit_h=False, fit_k=False,  # Freeze inclination and RAAN
+    fit_L=True,                # Solve for along-track phasing
+    fit_bstar=False
 )
 
-# Note: If you want to perform Joint OD + Calibration on the synthetic dataset,
-# you would uncomment the bias groups here and in the DopplerMeasurement below.
-# ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
-# ssv_dopp.add_linear_bias(name="pass_time_bias", group_indices=c_dopp)
+# Add ONLY the frequency bias group to the state vector
+ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
 
 station_model = system.DifferentiableStation(
     lat_deg=78.228874, 
@@ -118,23 +119,25 @@ prop_dopp = system.SGP4(ssv=ssv_dopp)
 meas_dopp = system.DopplerMeasurement(
     ssv=ssv_dopp, 
     station_model=station_model,
-    # freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"),
-    # time_bias_group=ssv_dopp.get_bias_group("pass_time_bias")
+    freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"),
+    time_bias_group=None # Handled manually below
 )
 
 pipe_dopp = system.MeasurementPipeline(propagator=prop_dopp, measurement_model=meas_dopp)
 
-t_since_dopp = (t_dopp - T_mean)
+# Apply the known global time bias directly to the observation timestamps
+t_since_dopp_calibrated = (t_dopp - T_mean) + known_global_time_bias_sec
 
 def functional_forward_calib(x) -> torch.Tensor:
     return pipe_dopp(
         x=x, 
-        tsince=t_since_dopp, 
+        tsince=t_since_dopp_calibrated, 
         epoch=T_mean, 
         center_freq=center_freq
     )
 
-x_dopp_out, _ = wgn_solve(
+# SVD solve is generally more robust for this type of constrained state vector
+x_dopp_out, _ = svd_solve(
     x_init=ssv_dopp.get_initial_state(),
     y_obs_fixed=d_dopp,
     forward_fn=functional_forward_calib,
@@ -148,12 +151,10 @@ x_dopp_out, _ = wgn_solve(
 # ---------------------------------------------------------
 print("\n--- Final Results Comparison ---")
 
-# Export and print both TLEs
 print(f"GPS-Fit TLE:\n{tle_gps_fit}\n")
 tle_dopp_fit = ssv_dopp.export(x_dopp_out)
 print(f"Doppler-Fit TLE:\n{tle_dopp_fit}\n")
 
-# Compute RIC Residuals against GPS Truth for BOTH fits
 results_ric = {}
 
 for name, state_vec in [("GPS-Fit", x_gps_out), ("Doppler-Fit", x_dopp_out)]:
@@ -165,14 +166,11 @@ for name, state_vec in [("GPS-Fit", x_gps_out), ("Doppler-Fit", x_dopp_out)]:
     )
     results_ric[name] = (pos_err, vel_err)
 
-# Print the RMS summary to the console
 print_ric_residual_summary(results_ric)
 
-# Plot RIC Comparison
 t_plot = (t_gps - T_mean) 
 plot_ric_residuals(t_plot, results_ric)
 
-# Plot Doppler Curves (Using the Doppler-fit state)
 with torch.no_grad():
     doppler_pred = functional_forward_calib(x_dopp_out)
 
