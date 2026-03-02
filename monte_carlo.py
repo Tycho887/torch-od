@@ -9,8 +9,8 @@ from astropy.time import Time
 # Internal diffod modules
 import diffod.state as state
 import diffod.functional.system as system
-from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, compute_observability_metrics
-from diffod.visualize import compute_ric_residuals, plot_segment_ric_residuals, plot_cross_validation
+from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, parameter_covariance_propagation, extract_cca_priors
+from diffod.visualize import compute_ric_residuals, plot_segment_ric_residuals, plot_median_forecast_trends, plot_observability_growth
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.cca import cca_solve
 
@@ -22,7 +22,7 @@ dtype = torch.float64
 center_freq = 1707.0  
 
 KNOWN_GLOBAL_TIME_BIAS_SEC = 0.277  
-MC_ITERATIONS = 1
+MC_ITERATIONS = 10
 STATE_NOISE_SCALE = 1e-4       
 DOPPLER_NOISE_STD_HZ = 5.0       
 
@@ -88,7 +88,7 @@ def run_doppler_od(
     ssv_dopp = state.MEE_SSV(
         init_tle=base_tle, 
         num_measurements=len(t_obs),
-        fit_mean_motion=True, fit_f=False, fit_g=False,  
+        fit_mean_motion=True, fit_f=False, fit_g=True,  
         fit_h=False, fit_k=False, fit_L=True, fit_bstar=False
     )
     ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_obs)
@@ -251,13 +251,14 @@ for chunk in data_chunks:
             experiment_results.append({
                 "chunk_id": chunk["chunk_id"],
                 "num_passes": 0,
+                "mc_iteration": 0, # Added for schema consistency
                 "1h_rmse": metrics.get('1h', np.nan),
                 "6h_rmse": metrics.get('6h', np.nan),
                 "24h_rmse": metrics.get('24h', np.nan),
-                "24h_R": np.nanmean(metrics['24h_R']),
-                "24h_I": np.nanmean(metrics['24h_I']),
-                "24h_C": np.nanmean(metrics['24h_C']),
-                "cov_frob": np.nan  # No covariance exists before OD
+                "24h_R": np.nanmean(metrics.get('24h_R', [np.nan])),
+                "24h_I": np.nanmean(metrics.get('24h_I', [np.nan])),
+                "24h_C": np.nanmean(metrics.get('24h_C', [np.nan])),
+                "cov_frob": np.nan 
             })
             
             print(f"  -> Passes: 0 | 1h RMSE: {metrics.get('1h', np.nan):.2f} km | 24h RMSE: {metrics.get('24h', np.nan):.2f} km (Baseline)")
@@ -278,11 +279,11 @@ for chunk in data_chunks:
         t_end_window = float(t_active[-1])
         tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
         
-        dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True, fit_f=True)
+        dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True)
         dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
         standard_x_guess = dummy_ssv.get_initial_state()
         
-        mc_metrics = {'1h': [], '6h': [], '24h': [], 'frob': []}
+        # mc_metrics = {'1h': [], '6h': [], '24h': [], 'frob': []}
         
         for i in range(MC_ITERATIONS):
             noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
@@ -292,7 +293,7 @@ for chunk in data_chunks:
             x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
                 x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
                 ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC
-            )
+            )   
 
             if num_passes == 6 and i == 0:
                 # Create a mask for the 24 hours immediately following this segment's epoch
@@ -308,116 +309,85 @@ for chunk in data_chunks:
                     tle_epoch_unix=t_mean_window
                 )
                 segment_ric_trajectories[f"Segment {chunk['chunk_id']}"] = (t_mins, pos_ric, vel_ric)
-            
-            mc_metrics['frob'].append(torch.sum(torch.diag(cov_mc)[:2]).item())
-            
+                        
+            # Evaluate metrics for THIS iteration
             metrics = evaluate_forecast_metrics(
                 x_state=x_mc_out, propagator=prop_mc,
                 t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
                 epoch_unix=t_mean_window, t_end_obs=t_end_window
             )
-            for k in ['1h', '6h', '24h']:
-                mc_metrics[k].append(metrics[k])
+            
+            # Append immediately
+            experiment_results.append({
+                "chunk_id": chunk["chunk_id"],
+                "num_passes": num_passes,
+                "mc_iteration": i,
+                "1h_rmse": metrics.get('1h', np.nan),
+                "6h_rmse": metrics.get('6h', np.nan),
+                "24h_rmse": metrics.get('24h', np.nan),
+                "cov_frob": torch.sum(torch.diag(cov_mc)[:2]).item()
+            })
+            print(f"  -> Passes: {num_passes} | 1h RMSE: {np.nanmean(metrics['1h']):.2f} km | 24h RMSE: {np.nanmean(metrics['24h']):.2f} km")
+
+
+            # metrics = evaluate_forecast_metrics(
+            #     x_state=x_mc_out, propagator=prop_mc,
+            #     t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+            #     epoch_unix=t_mean_window, t_end_obs=t_end_window
+            # )
+            # for k in ['1h', '6h', '24h']:
+            #     mc_metrics[k].append(metrics[k])
                 
-        experiment_results.append({
-            "chunk_id": chunk["chunk_id"],
-            "num_passes": num_passes,
-            "1h_rmse": np.nanmean(mc_metrics['1h']),
-            "6h_rmse": np.nanmean(mc_metrics['6h']),
-            "24h_rmse": np.nanmean(mc_metrics['24h']),
-            "cov_frob": np.nanmean(mc_metrics['frob'])
-        })
+        # experiment_results.append({
+        #     "chunk_id": chunk["chunk_id"],
+        #     "num_passes": num_passes,
+        #     "1h_rmse": np.nanmean(mc_metrics['1h']),
+        #     "6h_rmse": np.nanmean(mc_metrics['6h']),
+        #     "24h_rmse": np.nanmean(mc_metrics['24h']),
+        #     "cov_frob": np.nanmean(mc_metrics['frob'])
+        # })
         
-        print(f"  -> Passes: {num_passes} | 1h RMSE: {np.nanmean(mc_metrics['1h']):.2f} km | 24h RMSE: {np.nanmean(mc_metrics['24h']):.2f} km")
 
 
+import seaborn as sns
 
-# Execute plotting
-plot_cross_validation(experiment_results)
-
-plot_segment_ric_residuals(segment_ric_trajectories)
-
-def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
-    print("\n--- Analyzing Parameter Observability ---")
-    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
-    passes_to_test = [1, 2, 3, 4, 5, 6]
+def plot_multipass_forecast_boxplots(results: list[dict]):
+    """Generates grouped box plots for OD performance metrics across MC iterations."""
+    # Convert Polars DataFrame to Pandas, as Seaborn integrates natively with Pandas
+    df = pl.DataFrame(results).to_pandas()
     
-    # We will just analyze the first chunk for clarity
-    chunk = data_chunks[0]
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
-    marginal_info_history = {p: [] for p in param_names}
-    condition_number_history = []
-    
-    for num_passes in passes_to_test:
-        active_pass_ids = chunk["pass_ids"][:num_passes]
-        pass_mask = torch.isin(chunk["c"], active_pass_ids)
-        
-        t_active = chunk["t"][pass_mask]
-        d_active_true = chunk["d_true"][pass_mask]
-        c_active = chunk["c"][pass_mask]
-        
-        t_mean_window = float(torch.mean(t_active))
-        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
-        
-        # Setup pipeline strictly for the forward pass
-        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
-        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
-        x_eval = eval_ssv.get_initial_state()
-        
-        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
-        station_model = system.DifferentiableStation(
-            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
-            ref_unix=t_mean_window, 
-            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
-            device=device
-        )
-        
-        prop_eval = system.SGP4(ssv=eval_ssv)
-        meas_eval = system.DopplerMeasurement(
-            ssv=eval_ssv, station_model=station_model,
-            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
-        )
-        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
-        
-        t_since = (t_active - t_mean_window) + KNOWN_GLOBAL_TIME_BIAS_SEC
-        
-        def forward_fn(x):
-            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
-            
-        marg_info, evals, _ = compute_observability_metrics(
-            x_state=x_eval, forward_fn=forward_fn, 
-            d_obs_fixed=d_active_true, sigma_obs=20.0, param_names=param_names
-        )
-        
-        for i, p in enumerate(param_names):
-            marginal_info_history[p].append(marg_info[i])
-            
-        # The condition number of the normalized FIM shows if the full state is theoretically solvable
-        condition_number_history.append(evals[-1] / (evals[0] + 1e-16))
-        
-    # --- Plotting ---
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    for p in param_names:
-        # Plotting on a log scale because n and L will vastly outpace B* and eccentricity
-        axes[0].plot(passes_to_test, marginal_info_history[p], marker='o', label=p, linewidth=2)
-        
-    axes[0].set_yscale('log')
-    axes[0].set_title("Marginal Fisher Information per Parameter")
+    # Plot 1-Hour Forecast Distribution
+    sns.boxplot(
+        data=df, x="num_passes", y="1h_rmse", hue="chunk_id", 
+        ax=axes[0], palette="Set2", showfliers=True
+    )
+    axes[0].set_title("1-Hour Forecast RMSE Distribution")
     axes[0].set_xlabel("Number of Passes")
-    axes[0].set_ylabel("Information Content (Log Scale)")
-    axes[0].grid(True, linestyle='--', alpha=0.6)
-    axes[0].legend(loc='lower right')
+    axes[0].set_ylabel("RMSE (km)")
+    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
     
-    axes[1].plot(passes_to_test, condition_number_history, marker='s', color='red', linewidth=2)
-    axes[1].set_yscale('log')
-    axes[1].set_title("Condition Number of Normalized FIM")
+    # Plot 24-Hour Forecast Distribution
+    sns.boxplot(
+        data=df, x="num_passes", y="24h_rmse", hue="chunk_id", 
+        ax=axes[1], palette="Set2", showfliers=True
+    )
+    axes[1].set_title("24-Hour Forecast RMSE Distribution")
     axes[1].set_xlabel("Number of Passes")
-    axes[1].set_ylabel("Condition Number (Lower = More Solvable)")
-    axes[1].grid(True, linestyle='--', alpha=0.6)
+    axes[1].set_ylabel("RMSE (km)")
+    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
     
+    # Adjust legends to not overlap with data
+    for ax in axes:
+        ax.legend(title="Data Segments", loc='upper right')
+
     plt.tight_layout()
     plt.show()
 
-# Run the analysis
+# Execute plotting
+# plot_cross_validation(experiment_results)
+plot_multipass_forecast_boxplots(experiment_results)
+plot_segment_ric_residuals(segment_ric_trajectories)
+plot_median_forecast_trends(experiment_results)
 plot_observability_growth(data_chunks, T_mean, tle_base, center_freq)

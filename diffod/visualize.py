@@ -3,6 +3,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy import stats
+import dsgp4
+from astropy.time import Time
+import diffod.state as state
+from diffod.utils import unix_to_mjd, compute_observability_metrics
 
 def compute_ric_residuals(
     x_state: torch.Tensor,
@@ -524,3 +528,124 @@ def plot_segment_ric_residuals(
     plt.suptitle('6-Pass Estimator: 24-Hour RIC Residuals Post-Fit', fontsize=16)
     plt.tight_layout()
     plt.show()
+
+def plot_median_forecast_trends(results: list[dict]):
+    """Plots the median RMSE across all segments and MC iterations vs N-passes."""
+    df = pl.DataFrame(results)
+    
+    # Aggregate to find the median RMSE for each forecast horizon
+    agg_df = df.group_by("num_passes").agg([
+        pl.col("1h_rmse").median().alias("1h_median"),
+        pl.col("6h_rmse").median().alias("6h_median"),
+        pl.col("24h_rmse").median().alias("24h_median")
+    ]).sort("num_passes")
+    
+    # Extract arrays for plotting
+    passes = agg_df["num_passes"].to_numpy()
+    rmse_1h = agg_df["1h_median"].to_numpy()
+    rmse_6h = agg_df["6h_median"].to_numpy()
+    rmse_24h = agg_df["24h_median"].to_numpy()
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Plot each horizon with distinct markers
+    plt.plot(passes, rmse_1h, marker='o', linewidth=2, label="1-Hour Forecast")
+    plt.plot(passes, rmse_6h, marker='s', linewidth=2, label="6-Hour Forecast")
+    plt.plot(passes, rmse_24h, marker='^', linewidth=2, label="24-Hour Forecast")
+    
+    plt.title("Median Forecast RMSE vs. Number of Passes")
+    plt.xlabel("Number of Passes")
+    plt.ylabel("Median RMSE (km)")
+    plt.xticks(passes)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    
+    # Note: If the error drops by orders of magnitude from 0 to 1 pass, 
+    # uncommenting the next line might make the 1-6 pass differences easier to read.
+    # plt.yscale('log') 
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
+    print("\n--- Analyzing Parameter Observability ---")
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    passes_to_test = [1, 2, 3, 4, 5, 6]
+    
+    # We will just analyze the first chunk for clarity
+    chunk = data_chunks[0]
+    
+    marginal_info_history = {p: [] for p in param_names}
+    condition_number_history = []
+    
+    for num_passes in passes_to_test:
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
+        
+        t_mean_window = float(torch.mean(t_active))
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        
+        # Setup pipeline strictly for the forward pass
+        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        x_eval = eval_ssv.get_initial_state()
+        
+        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+        station_model = system.DifferentiableStation(
+            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+            ref_unix=t_mean_window, 
+            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+        )
+        
+        prop_eval = system.SGP4(ssv=eval_ssv)
+        meas_eval = system.DopplerMeasurement(
+            ssv=eval_ssv, station_model=station_model,
+            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+        )
+        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+        
+        t_since = (t_active - t_mean_window) + 0.277
+        
+        def forward_fn(x):
+            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
+            
+        marg_info, evals, _ = compute_observability_metrics(
+            x_state=x_eval, forward_fn=forward_fn, 
+            d_obs_fixed=d_active_true, sigma_obs=20.0, param_names=param_names
+        )
+        
+        for i, p in enumerate(param_names):
+            marginal_info_history[p].append(marg_info[i])
+            
+        # The condition number of the normalized FIM shows if the full state is theoretically solvable
+        condition_number_history.append(evals[-1] / (evals[0] + 1e-16))
+        
+    # --- Plotting ---
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    for p in param_names:
+        # Plotting on a log scale because n and L will vastly outpace B* and eccentricity
+        axes[0].plot(passes_to_test, marginal_info_history[p], marker='o', label=p, linewidth=2)
+        
+    axes[0].set_yscale('log')
+    axes[0].set_title("Marginal Fisher Information per Parameter")
+    axes[0].set_xlabel("Number of Passes")
+    axes[0].set_ylabel("Information Content (Log Scale)")
+    axes[0].grid(True, linestyle='--', alpha=0.6)
+    axes[0].legend(loc='lower right')
+    
+    axes[1].plot(passes_to_test, condition_number_history, marker='s', color='red', linewidth=2)
+    axes[1].set_yscale('log')
+    axes[1].set_title("Condition Number of Normalized FIM")
+    axes[1].set_xlabel("Number of Passes")
+    axes[1].set_ylabel("Condition Number (Lower = More Solvable)")
+    axes[1].grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Run the analysis
