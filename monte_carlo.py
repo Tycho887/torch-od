@@ -37,7 +37,10 @@ epoch_unix = 1762207191
 # 2. Function Definitions
 # =========================================================
 def create_pass_chunks(t, d, c, passes_per_chunk=6, num_chunks=4):
-    """Splits the dataset into independent chunks based on contact indices."""
+    """
+    Splits the dataset into independent chunks and remaps contact 
+    indices to be contiguous (e.g., [4,4,5,5] -> [0,0,1,1]).
+    """
     unique_passes = torch.unique(c)
     chunks = []
     
@@ -49,15 +52,23 @@ def create_pass_chunks(t, d, c, passes_per_chunk=6, num_chunks=4):
             print(f"Warning: Only enough data for {i} full chunks of {passes_per_chunk} passes.")
             break
             
+        # 1. Mask the original data
         chunk_passes = unique_passes[start_idx:end_idx]
         mask = torch.isin(c, chunk_passes)
+        
+        c_masked = c[mask]
+        
+        # 2. Remap contact indices to a 0-based contiguous sequence
+        # original_unique will hold [4, 5, 6...], c_remapped will hold [0, 0... 1, 1...]
+        original_unique, c_remapped = torch.unique(c_masked, return_inverse=True)
         
         chunks.append({
             "chunk_id": i,
             "t": t[mask],
             "d_true": d[mask],
-            "c": c[mask],
-            "pass_ids": chunk_passes
+            "c": c_remapped, 
+            "pass_ids": torch.unique(c_remapped),   # Use the new 0, 1, 2... IDs for the inner loop
+            "original_pass_ids": original_unique    # Keep the global IDs just in case you need them for logging
         })
         
     return chunks
