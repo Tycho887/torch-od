@@ -1,9 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
-import dsgp4
 import numpy as np
-import torch
-import matplotlib.pyplot as plt
+import polars as pl
 from scipy import stats
 
 def compute_ric_residuals(
@@ -446,5 +444,83 @@ def plot_uncertainty_bounds(t_gps, ensemble_ric, std_analytical):
 
     axes[-1].set_xlabel('Time since start (minutes)')
     plt.suptitle('Orbit Determination Uncertainty: Empirical Monte Carlo vs. Analytical Jacobian', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+def plot_cross_validation(results: list[dict]):
+    """Generates cross-validated bar plots for OD performance metrics."""
+    df = pl.DataFrame(results)
+    passes = sorted(df["num_passes"].unique().to_list())
+    chunks = sorted(df["chunk_id"].unique().to_list())
+    
+    metrics_to_plot = [
+        ("1h_rmse", "1-Hour Forecast RMSE (km)"),
+        ("24h_rmse", "24-Hour Forecast RMSE (km)"),
+        ("cov_frob", "Covariance Frobenius Norm")
+    ]
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    bar_width = 0.8 / len(chunks)
+    
+    for ax, (metric_key, title) in zip(axes, metrics_to_plot):
+        for i, chunk_id in enumerate(chunks):
+            chunk_data = df.filter(pl.col("chunk_id") == chunk_id).sort("num_passes")
+            x_offsets = np.arange(len(passes)) + (i * bar_width) - (0.4 - bar_width/2)
+            
+            y_vals = chunk_data[metric_key].to_numpy()
+            ax.bar(x_offsets, y_vals, width=bar_width, label=f"Segment {chunk_id}", alpha=0.8)
+            
+        ax.set_title(title)
+        ax.set_xlabel("Number of Passes")
+        ax.set_xticks(np.arange(len(passes)))
+        ax.set_xticklabels(passes)
+        ax.grid(axis='y', linestyle='--', alpha=0.6)
+        
+        # Add a logarithmic scale if plotting the Frobenius norm
+        if "Covariance" in title:
+            ax.set_yscale('log')
+            
+    axes[-1].legend(title="Data Segments")
+    plt.tight_layout()
+    plt.show()
+
+def plot_segment_ric_residuals(
+    segment_results_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+):
+    """
+    Plots the RIC position and velocity errors for different dataset segments.
+    Expects segment_results_dict to map 'Segment Name' -> (t_mins, pos_ric, vel_ric).
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
+    components = ['Radial', 'Along-track', 'Cross-track']
+    
+    # Use a standard colormap to dynamically handle any number of segments
+    colors = plt.cm.tab10.colors 
+
+    for idx, (name, (t_mins, pos_ric, vel_ric)) in enumerate(segment_results_dict.items()):
+        pos_np = pos_ric.detach().cpu().numpy()
+        vel_np = vel_ric.detach().cpu().numpy()
+        
+        # Convert minutes to hours for easier reading on a 24h forecast
+        t_plot_hours = t_mins.detach().cpu().numpy() / 60.0 
+        
+        style = {"color": colors[idx % len(colors)], "linestyle": "-", "alpha": 0.8, "linewidth": 2}
+
+        for i in range(3):
+            axes[0, i].plot(t_plot_hours, pos_np[:, i], label=name, **style)
+            axes[1, i].plot(t_plot_hours, vel_np[:, i], label=name, **style)
+
+    for i, comp in enumerate(components):
+        axes[0, i].set_title(f'{comp} Error')
+        axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
+        axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
+        axes[1, i].set_xlabel('Time Since Fit Epoch (Hours)')
+        
+        for row in range(2):
+            axes[row, i].grid(True, linestyle=':', alpha=0.7)
+            if i == 0 and row == 0:
+                axes[row, i].legend(loc='upper left')
+
+    plt.suptitle('6-Pass Estimator: 24-Hour RIC Residuals Post-Fit', fontsize=16)
     plt.tight_layout()
     plt.show()

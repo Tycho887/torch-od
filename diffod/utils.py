@@ -2,12 +2,11 @@ import torch
 from dsgp4.tle import TLE
 from dsgp4.util import from_datetime_to_mjd
 from dataclasses import dataclass
-import torch
-# import polars as pl
+import math
+from torch.func import jacfwd
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
-# from dsgp4.tle import TLE
 
 @dataclass
 class BiasGroup:
@@ -330,3 +329,129 @@ def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.flo
 # Example usage within your pipeline:
 # center_freq = 2.2e9 
 # t_obs, d_obs, c_obs = load_gmd_to_tensors("output_dsn_tcp_biased.gmd", center_freq)
+
+import torch
+
+def extract_cca_priors(
+    cov_matrix: torch.Tensor,
+    estimate_mask: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Extracts the Consider Covariance (P_cc) and the Inverse Prior 
+    Information (P_x_inv) from a full joint covariance matrix.
+    
+    Args:
+        cov_matrix: The 7x7 (or NxN) propagated covariance matrix from the GPS fit.
+        estimate_mask: Boolean tensor indicating which parameters are being estimated (e.g., n and L).
+        
+    Returns:
+        P_cc: Covariance matrix of the unestimated (consider) parameters.
+        P_x_inv: Inverse of the prior covariance matrix for the estimated parameters.
+    """
+    # 1. Define the consider mask (the exact inverse of the estimate mask)
+    consider_mask = ~estimate_mask
+
+    # 2. Extract the Consider Covariance block
+    # Subsets the matrix for rows and columns corresponding to consider params
+    P_cc = cov_matrix[consider_mask][:, consider_mask]
+
+    # 3. Extract the Estimated Covariance block
+    P_x = cov_matrix[estimate_mask][:, estimate_mask]
+
+    # 4. Invert P_x to create the a priori Information Matrix (W_prior)
+    # Using cholesky_inverse or pseudoinverse (pinv) adds numerical stability
+    try:
+        L = torch.linalg.cholesky(P_x)
+        P_x_inv = torch.cholesky_inverse(L)
+    except torch._linalg_check_errors:
+        print("Warning: P_x is singular or ill-conditioned. Falling back to pseudo-inverse.")
+        P_x_inv = torch.linalg.pinv(P_x)
+
+    return P_cc, P_x_inv
+
+def parameter_covariance_propagation(
+    x_state: torch.Tensor,
+    P_state: torch.Tensor,
+    propagator: torch.nn.Module,
+    tsince: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Propagates the state covariance forward to a given timestamp and 
+    transforms it from MEE parameters to Cartesian (TEME) coordinates.
+    
+    Args:
+        x_state: The initial state vector (e.g., MEE + biases).
+        P_state: The NxN covariance matrix of the initial state.
+        propagator: The diffod propagator module (e.g., system.SGP4).
+        tsince: The time elapsed since the state epoch (1D tensor).
+        
+    Returns:
+        cartesian_state: The 6D (Position, Velocity) TEME vector at tf.
+        P_cartesian: The 6x6 Cartesian covariance matrix at tf.
+    """
+    
+    # 1. Define a pure function for the Cartesian forward pass
+    def get_cartesian_state(x: torch.Tensor) -> torch.Tensor:
+        # Evaluate the propagator at the target time
+        # In diffod, this typically returns (r, v) where each is (N_times, 3)
+        r_teme, v_teme = propagator(ssv_state=x, tsince=tsince)
+        
+        # We concatenate position and velocity to form a 6D state vector
+        # Squeeze ensures we get a 1D vector of length 6 for a single time step
+        return torch.cat([r_teme.squeeze(), v_teme.squeeze()], dim=-1)
+
+    # 2. Evaluate the Cartesian state at the target time
+    cartesian_state = get_cartesian_state(x_state)
+
+    # 3. Compute the Jacobian of the Cartesian output w.r.t. the MEE input
+    # This acts as our State Transition Matrix from MEE(t0) -> TEME(tf)
+    # Shape: (6, len(x_state))
+    J = jacfwd(get_cartesian_state)(x_state)
+
+    # If the state vector includes biases (e.g., len > 7), we only want 
+    # to propagate the orbital elements' covariance into the Cartesian frame.
+    # Assuming the first 6 or 7 elements are the orbital state:
+    num_orb_params = P_state.shape[0] 
+    J_orb = J[:, :num_orb_params] 
+
+    # 4. Apply the similarity transformation: P_cart = J * P_state * J^T
+    # Shape: (6, 6)
+    P_cartesian = J_orb @ P_state @ J_orb.T
+
+    return cartesian_state, P_cartesian
+
+def propagate_mee_covariance(
+    P_old: torch.Tensor, 
+    dt_seconds: float, 
+    n_idx: int, 
+    L_idx: int
+) -> torch.Tensor:
+    """
+    Propagates the MEE covariance matrix forward in time analytically, 
+    accounting for the uncertainty growth in Mean Longitude due to Mean Motion.
+    
+    Args:
+        P_old: The NxN covariance matrix at the original epoch.
+        dt_seconds: The time difference between the new epoch and old epoch.
+        n_idx: The integer index of Mean Motion (n) in the covariance matrix.
+        L_idx: The integer index of Mean Longitude (L) in the covariance matrix.
+        
+    Returns:
+        P_new: The propagated NxN covariance matrix.
+    """
+    # 1. Initialize the State Transition Matrix as the Identity matrix
+    N = P_old.shape[0]
+    Phi = torch.eye(N, dtype=P_old.dtype, device=P_old.device)
+    
+    # 2. Compute the kinematic derivative: dL / dn
+    # Assuming 'n' is in Revs/Day and 'L' is in Radians
+    dt_days = dt_seconds / 86400.0
+    dL_dn = dt_days * 2.0 * math.pi
+    
+    # 3. Insert the derivative into the State Transition Matrix
+    Phi[L_idx, n_idx] = dL_dn
+    
+    # 4. Apply the similarity transformation
+    P_new = Phi @ P_old @ Phi.T
+    
+    return P_new
