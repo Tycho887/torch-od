@@ -567,6 +567,38 @@ def plot_median_forecast_trends(results: list[dict]):
     plt.tight_layout()
     plt.show()
 
+import seaborn as sns
+
+def plot_dof_forecast_trends(results: list[dict]):
+    """Plots the RMSE trends vs passes, separated by DOF configuration."""
+    df = pl.DataFrame(results).filter(pl.col("num_passes") > 0).to_pandas()
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharex=True)
+    
+    horizons = [
+        ("1h_rmse", "1-Hour Forecast RMSE (km)"),
+        ("6h_rmse", "6-Hour Forecast RMSE (km)"),
+        ("24h_rmse", "24-Hour Forecast RMSE (km)")
+    ]
+    
+    for ax, (metric_col, title) in zip(axes, horizons):
+        # sns.lineplot automatically aggregates and plots the mean/median with a confidence interval band
+        sns.lineplot(
+            data=df, x="num_passes", y=metric_col, hue="dof_config", 
+            ax=ax, marker='o', estimator='median', errorbar=('pi', 50), # 50th percentile band
+            linewidth=2
+        )
+        ax.set_title(title)
+        ax.set_xlabel("Number of Passes")
+        ax.set_ylabel("Median RMSE (km)")
+        ax.grid(True, linestyle='--', alpha=0.6)
+        
+        # Log scale might be helpful to see the difference between configs clearly
+        ax.set_yscale('log') 
+        
+    plt.tight_layout()
+    plt.show()
+
 def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
     print("\n--- Analyzing Parameter Observability ---")
     param_names = ["n", "f", "g", "h", "k", "L", "B*"]

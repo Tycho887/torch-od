@@ -10,7 +10,7 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, parameter_covariance_propagation, extract_cca_priors
-from diffod.visualize import compute_ric_residuals, plot_segment_ric_residuals, plot_median_forecast_trends, plot_observability_growth
+from diffod.visualize import compute_ric_residuals, plot_segment_ric_residuals, plot_median_forecast_trends, plot_observability_growth, plot_dof_forecast_trends
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.cca import cca_solve
 
@@ -22,7 +22,7 @@ dtype = torch.float64
 center_freq = 1707.0  
 
 KNOWN_GLOBAL_TIME_BIAS_SEC = 0.277  
-MC_ITERATIONS = 10
+MC_ITERATIONS = 1
 STATE_NOISE_SCALE = 1e-4       
 DOPPLER_NOISE_STD_HZ = 5.0       
 
@@ -81,15 +81,17 @@ def run_doppler_od(
     c_obs: torch.Tensor,
     ref_unix: float,
     base_tle: dsgp4.TLE,
+    dof_config: dict,  # <-- NEW PARAMETER
     center_freq: float = 1707.0,
     time_bias_sec: float = 0.277
 ) -> tuple[torch.Tensor, torch.Tensor, object, object]:
-    """Runs Doppler-only OD and returns the state, covariance, SSV, and propagator."""
+    
+    # Unpack the dynamic configuration into the SSV initialization
     ssv_dopp = state.MEE_SSV(
         init_tle=base_tle, 
         num_measurements=len(t_obs),
-        fit_mean_motion=True, fit_f=False, fit_g=True,  
-        fit_h=False, fit_k=False, fit_L=True, fit_bstar=False
+        fit_bstar=False,
+        **dof_config  
     )
     ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_obs)
 
@@ -212,6 +214,16 @@ tle_gps_fit = ssv_gps.export(x_gps_out)
 # =========================================================
 print("\n--- Phase 2: Multi-Dimensional Epoch-Centered Simulation ---")
 
+dof_configs = {
+    "1-DOF (L)": {"fit_mean_motion": False, "fit_L": True, "fit_f": False, "fit_g": False, "fit_h": False, "fit_k": False},
+    "2-DOF (n, L)": {"fit_mean_motion": True, "fit_L": True, "fit_f": False, "fit_g": False, "fit_h": False, "fit_k": False},
+    "2-DOF (n, f)": {"fit_mean_motion": True, "fit_L": False, "fit_f": True, "fit_g": False, "fit_h": False, "fit_k": False},
+    "3-DOF (n, L, f)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": False, "fit_h": False, "fit_k": False},
+    "4-DOF (n, L, f, g)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": True, "fit_h": False, "fit_k": False},
+    # "5-DOF (n, L, f, g)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": True, "fit_h": False, "fit_k": False},
+    # "6-DOF (Full State)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": True, "fit_h": True, "fit_k": True}
+}
+
 data_chunks = create_pass_chunks(t_dopp, d_dopp_true, c_dopp, passes_per_chunk=6, num_chunks=4)
 passes_to_test = [0, 1, 2, 3, 4, 5, 6]  # Added 0 to the test list
 experiment_results = []
@@ -278,55 +290,93 @@ for chunk in data_chunks:
         t_mean_window = float(torch.mean(t_active))
         t_end_window = float(t_active[-1])
         tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
-        
-        dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True)
-        dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
-        standard_x_guess = dummy_ssv.get_initial_state()
-        
-        # mc_metrics = {'1h': [], '6h': [], '24h': [], 'frob': []}
-        
-        for i in range(MC_ITERATIONS):
-            noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
-            x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
-            d_active_noisy = d_active_true + torch.randn_like(d_active_true) * DOPPLER_NOISE_STD_HZ
-            
-            x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
-                x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
-                ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC
-            )   
 
-            if num_passes == 6 and i == 0:
-                # Create a mask for the 24 hours immediately following this segment's epoch
-                t_forecast_mask = (t_gps >= t_mean_window) & (t_gps <= t_mean_window + 24 * 3600)
-                
-                # Compute the residuals for this specific window
-                t_mins, pos_ric, vel_ric = compute_ric_residuals(
-                    x_state=x_mc_out, 
-                    propagator=prop_mc,
-                    t_gps=t_gps[t_forecast_mask], 
-                    r_gps=r_gps[t_forecast_mask], 
-                    v_gps=v_gps[t_forecast_mask],
-                    tle_epoch_unix=t_mean_window
-                )
-                segment_ric_trajectories[f"Segment {chunk['chunk_id']}"] = (t_mins, pos_ric, vel_ric)
-                        
-            # Evaluate metrics for THIS iteration
-            metrics = evaluate_forecast_metrics(
-                x_state=x_mc_out, propagator=prop_mc,
-                t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
-                epoch_unix=t_mean_window, t_end_obs=t_end_window
-            )
+        # Iterate through the DOF configurations
+        for config_name, config_params in dof_configs.items():
             
-            # Append immediately
-            experiment_results.append({
-                "chunk_id": chunk["chunk_id"],
-                "num_passes": num_passes,
-                "mc_iteration": i,
-                "1h_rmse": metrics.get('1h', np.nan),
-                "6h_rmse": metrics.get('6h', np.nan),
-                "24h_rmse": metrics.get('24h', np.nan),
-                "cov_frob": torch.sum(torch.diag(cov_mc)[:2]).item()
-            })
+            # Setup the dummy SSV for this specific configuration to get the correct active map
+            dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), **config_params)
+            dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+            standard_x_guess = dummy_ssv.get_initial_state()
+            
+            for i in range(MC_ITERATIONS):
+                noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
+                x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
+                d_active_noisy = d_active_true + torch.randn_like(d_active_true) * DOPPLER_NOISE_STD_HZ
+                
+                # Pass the configuration into the OD function
+                x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
+                    x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
+                    ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC,
+                    dof_config=config_params  # <-- NEW
+                )
+
+                metrics = evaluate_forecast_metrics(
+                    x_state=x_mc_out, propagator=prop_mc,
+                    t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+                    epoch_unix=t_mean_window, t_end_obs=t_end_window
+                )
+                
+                experiment_results.append({
+                    "chunk_id": chunk["chunk_id"],
+                    "num_passes": num_passes,
+                    "mc_iteration": i,
+                    "dof_config": config_name,  # <-- NEW
+                    "1h_rmse": metrics.get('1h', np.nan),
+                    "6h_rmse": metrics.get('6h', np.nan),
+                    "24h_rmse": metrics.get('24h', np.nan),
+                    "cov_frob": torch.sum(torch.diag(cov_mc)[:2]).item() if cov_mc is not None else np.nan
+                })
+
+        # dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True)
+        # dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        # standard_x_guess = dummy_ssv.get_initial_state()
+        
+        # # mc_metrics = {'1h': [], '6h': [], '24h': [], 'frob': []}
+        
+        # for i in range(MC_ITERATIONS):
+        #     noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
+        #     x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
+        #     d_active_noisy = d_active_true + torch.randn_like(d_active_true) * DOPPLER_NOISE_STD_HZ
+            
+        #     x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
+        #         x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
+        #         ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC, dof_config="Baseline"
+        #     )   
+
+        #     if num_passes == 6 and i == 0:
+        #         # Create a mask for the 24 hours immediately following this segment's epoch
+        #         t_forecast_mask = (t_gps >= t_mean_window) & (t_gps <= t_mean_window + 24 * 3600)
+                
+        #         # Compute the residuals for this specific window
+        #         t_mins, pos_ric, vel_ric = compute_ric_residuals(
+        #             x_state=x_mc_out, 
+        #             propagator=prop_mc,
+        #             t_gps=t_gps[t_forecast_mask], 
+        #             r_gps=r_gps[t_forecast_mask], 
+        #             v_gps=v_gps[t_forecast_mask],
+        #             tle_epoch_unix=t_mean_window
+        #         )
+        #         segment_ric_trajectories[f"Segment {chunk['chunk_id']}"] = (t_mins, pos_ric, vel_ric)
+                        
+        #     # Evaluate metrics for THIS iteration
+        #     metrics = evaluate_forecast_metrics(
+        #         x_state=x_mc_out, propagator=prop_mc,
+        #         t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+        #         epoch_unix=t_mean_window, t_end_obs=t_end_window,
+        #         dof_config=config_params  # <-- NEW
+        #     )
+            
+        #     # Append immediately
+        #     experiment_results.append({
+        #         "chunk_id": chunk["chunk_id"],
+        #         "num_passes": num_passes,
+        #         "mc_iteration": i,
+        #         "1h_rmse": metrics.get('1h', np.nan),
+        #         "6h_rmse": metrics.get('6h', np.nan),
+        #         "24h_rmse": metrics.get('24h', np.nan),
+        #         "cov_frob": torch.sum(torch.diag(cov_mc)[:2]).item()
+        #     })
             print(f"  -> Passes: {num_passes} | 1h RMSE: {np.nanmean(metrics['1h']):.2f} km | 24h RMSE: {np.nanmean(metrics['24h']):.2f} km")
 
 
@@ -349,45 +399,45 @@ for chunk in data_chunks:
         
 
 
-import seaborn as sns
+# import seaborn as sns
 
-def plot_multipass_forecast_boxplots(results: list[dict]):
-    """Generates grouped box plots for OD performance metrics across MC iterations."""
-    # Convert Polars DataFrame to Pandas, as Seaborn integrates natively with Pandas
-    df = pl.DataFrame(results).to_pandas()
+# def plot_multipass_forecast_boxplots(results: list[dict]):
+#     """Generates grouped box plots for OD performance metrics across MC iterations."""
+#     # Convert Polars DataFrame to Pandas, as Seaborn integrates natively with Pandas
+#     df = pl.DataFrame(results).to_pandas()
     
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+#     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Plot 1-Hour Forecast Distribution
-    sns.boxplot(
-        data=df, x="num_passes", y="1h_rmse", hue="chunk_id", 
-        ax=axes[0], palette="Set2", showfliers=True
-    )
-    axes[0].set_title("1-Hour Forecast RMSE Distribution")
-    axes[0].set_xlabel("Number of Passes")
-    axes[0].set_ylabel("RMSE (km)")
-    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
+#     # Plot 1-Hour Forecast Distribution
+#     sns.boxplot(
+#         data=df, x="num_passes", y="1h_rmse", hue="chunk_id", 
+#         ax=axes[0], palette="Set2", showfliers=True
+#     )
+#     axes[0].set_title("1-Hour Forecast RMSE Distribution")
+#     axes[0].set_xlabel("Number of Passes")
+#     axes[0].set_ylabel("RMSE (km)")
+#     axes[0].grid(axis='y', linestyle='--', alpha=0.6)
     
-    # Plot 24-Hour Forecast Distribution
-    sns.boxplot(
-        data=df, x="num_passes", y="24h_rmse", hue="chunk_id", 
-        ax=axes[1], palette="Set2", showfliers=True
-    )
-    axes[1].set_title("24-Hour Forecast RMSE Distribution")
-    axes[1].set_xlabel("Number of Passes")
-    axes[1].set_ylabel("RMSE (km)")
-    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
+#     # Plot 24-Hour Forecast Distribution
+#     sns.boxplot(
+#         data=df, x="num_passes", y="24h_rmse", hue="chunk_id", 
+#         ax=axes[1], palette="Set2", showfliers=True
+#     )
+#     axes[1].set_title("24-Hour Forecast RMSE Distribution")
+#     axes[1].set_xlabel("Number of Passes")
+#     axes[1].set_ylabel("RMSE (km)")
+#     axes[1].grid(axis='y', linestyle='--', alpha=0.6)
     
-    # Adjust legends to not overlap with data
-    for ax in axes:
-        ax.legend(title="Data Segments", loc='upper right')
+#     # Adjust legends to not overlap with data
+#     for ax in axes:
+#         ax.legend(title="Data Segments", loc='upper right')
 
-    plt.tight_layout()
-    plt.show()
+#     plt.tight_layout()
+#     plt.show()
 
 # Execute plotting
 # plot_cross_validation(experiment_results)
-plot_multipass_forecast_boxplots(experiment_results)
+plot_dof_forecast_trends(experiment_results)
 plot_segment_ric_residuals(segment_ric_trajectories)
 plot_median_forecast_trends(experiment_results)
 plot_observability_growth(data_chunks, T_mean, tle_base, center_freq)
