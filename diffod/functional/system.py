@@ -170,6 +170,9 @@ class GPSInterpolator(nn.Module):
         self.time_bias_group = time_bias_group
 
     def forward(self, x: torch.Tensor, tsince: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+
+        tsince = tsince * 60
+
         args = self.ssv.get_functional_args(x)
         print(args.get("time_offset", 0.0))
         total_time_offset = args.get("time_offset", 0.0)

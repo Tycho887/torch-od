@@ -331,3 +331,79 @@ def plot_pass_biases(freq_biases_hz: torch.Tensor | np.ndarray | list,
     
     plt.tight_layout()
     plt.show()
+
+import matplotlib.pyplot as plt
+import torch
+import diffod.functional.system as system
+
+def compare_doppler_models(
+    t_dopp: torch.Tensor, 
+    d_dopp: torch.Tensor, 
+    t_gps: torch.Tensor, 
+    r_gps: torch.Tensor, 
+    v_gps: torch.Tensor,
+    x_tle_init: torch.Tensor, 
+    x_gps_fit: torch.Tensor, 
+    ssv, 
+    station_model, 
+    T_mean: float, 
+    center_freq: float
+):
+    """
+    Evaluates and plots the residuals of the measured Doppler against 
+    Initial TLE, GPS-Fitted TLE, and Direct GPS Interpolation.
+    """
+    t_since_dopp = t_dopp - T_mean
+    
+    # 1. Setup SGP4 Pipeline
+    prop_sgp4 = system.SGP4(ssv=ssv, use_pretrained_model=False)
+    meas_dopp = system.DopplerMeasurement(ssv=ssv, station_model=station_model)
+    pipe_sgp4 = system.MeasurementPipeline(propagator=prop_sgp4, measurement_model=meas_dopp)
+    
+    # 2. Setup GPS Interpolator Pipeline
+    interpolator = system.GPSInterpolator(
+        ssv=ssv,
+        t_gps_ref=(t_gps - T_mean),
+        r_gps_ref=r_gps,
+        v_gps_ref=v_gps
+    )
+    pipe_interp = system.MeasurementPipeline(propagator=interpolator, measurement_model=meas_dopp)
+    
+    # 3. Generate Predictions
+    with torch.no_grad():
+        d_pred_init = pipe_sgp4(x=x_tle_init, tsince=t_since_dopp, epoch=T_mean, center_freq=center_freq)
+        d_pred_fit = pipe_sgp4(x=x_gps_fit, tsince=t_since_dopp, epoch=T_mean, center_freq=center_freq)
+        d_pred_interp = pipe_interp(x=x_gps_fit, tsince=t_since_dopp, epoch=T_mean, center_freq=center_freq)
+        
+    # 4. Calculate Residuals (Measured - Predicted)
+    res_init = (d_dopp - d_pred_init).cpu().numpy()
+    res_fit = (d_dopp - d_pred_fit).cpu().numpy()
+    res_interp = (d_dopp - d_pred_interp).cpu().numpy()
+    t_plot = (t_since_dopp / 60.0).cpu().numpy() # Plot in minutes from epoch
+
+    # 5. Plotting
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    
+    # Top Plot: Absolute Doppler
+    axs[0].scatter(t_plot, d_dopp.cpu().numpy(), color='black', label='Measured (GMAT)', s=10, alpha=0.6)
+    axs[0].plot(t_plot, d_pred_init.cpu().numpy(), color='red', label='Initial TLE', linewidth=1)
+    axs[0].plot(t_plot, d_pred_fit.cpu().numpy(), color='blue', label='GPS-Fit TLE', linewidth=1)
+    axs[0].plot(t_plot, d_pred_interp.cpu().numpy(), color='green', label='GPS Interpolated', linewidth=1, linestyle='--')
+    axs[0].set_ylabel("Doppler Shift (Hz)")
+    axs[0].set_title("Absolute Doppler Frequencies")
+    axs[0].legend()
+    axs[0].grid(True, alpha=0.3)
+    
+    # Bottom Plot: Residuals
+    axs[1].scatter(t_plot, res_init, color='red', label=f'Init TLE RMS: {np.sqrt(np.mean(res_init**2)):.2f} Hz', s=5)
+    axs[1].scatter(t_plot, res_fit, color='blue', label=f'GPS-Fit RMS: {np.sqrt(np.mean(res_fit**2)):.2f} Hz', s=5)
+    axs[1].scatter(t_plot, res_interp, color='green', label=f'GPS Interp RMS: {np.sqrt(np.mean(res_interp**2)):.2f} Hz', s=5)
+    axs[1].axhline(0, color='black', linewidth=1)
+    axs[1].set_xlabel(f"Time since Epoch {T_mean} (Minutes)")
+    axs[1].set_ylabel("Residuals (Hz)")
+    axs[1].set_title("Doppler Residuals (Measured - Predicted)")
+    axs[1].legend()
+    axs[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()

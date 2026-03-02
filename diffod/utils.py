@@ -57,7 +57,7 @@ def load_gmat_csv_block(file_path, tle_epoch_unix, block_sec) -> tuple[torch.Ten
     # Convert TAI MJD directly to Unix Seconds (UTC)
     # 1. Base conversion: (MJD - 10587.0) * 86400.0
     # 2. Offset: Subtract 37.0 seconds to align TAI with UTC
-    df['unix'] = ((df[0].values - 10587.0) * 86400.0) #- 37.0
+    df['unix'] = ((df[0].values - 10587.0) * 86400.0)
     
     # Filter by time window
     mask = (df['unix'] >= tle_epoch_unix) & (df['unix'] <= tle_epoch_unix + block_sec)
@@ -300,7 +300,7 @@ def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.flo
     # GMAT TAIModJulian = MJD + 2430000.5 (JD). 
     # Standard MJD to Unix conversion: (MJD - 10587.0) * 86400
     mjd_vals = raw_arr[:, 0]
-    times_unix_np = (mjd_vals - 10587.0) * 86400.0 #- 37.0
+    times_unix_np = (mjd_vals - 10587.0) * 86400.0 + 19
     
     # 3. Calculate Doppler Shift (Observed - Nominal)
     # Note: GMD DSN_TCP values are often negative in GMAT output; 
@@ -308,6 +308,8 @@ def load_gmd_to_tensors(file_path, center_freq_hz, device="cpu", dtype=torch.flo
     raw_freqs = np.abs(raw_arr[:, 1])
     doppler_hz_np = raw_freqs - center_freq_hz * 1e6
     
+    print(raw_freqs.min(), raw_freqs.max())
+
     # 4. Generate "Contacts" (Pass-Splitting)
     # If delta_t > 2 seconds, it is a new pass.
     time_diffs = np.diff(times_unix_np, prepend=times_unix_np[0])
