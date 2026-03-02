@@ -10,21 +10,20 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy
-from diffod.visualize import compute_ric_residuals, print_ric_residual_summary
+from diffod.visualize import compute_ric_residuals
 from diffod.solvers.gn_svd import svd_solve
 
-# ---------------------------------------------------------
-# 1. Configuration & Data Loading
-# ---------------------------------------------------------
+# =========================================================
+# 1. Configuration 
+# =========================================================
 device = torch.device(device="cpu")
 dtype = torch.float64
 center_freq = 1707.0  
 
-# Parameters for the Monte Carlo Simulation
-KNOWN_GLOBAL_TIME_BIAS_SEC = 0.277  # Replace with your actual bias
-MC_ITERATIONS = 20
-STATE_NOISE_SCALE = 1e-4          # Relative scaling for initial state perturbation
-DOPPLER_NOISE_STD_HZ = 20.0       # Absolute Hz white noise added to measurements
+KNOWN_GLOBAL_TIME_BIAS_SEC = 0.277  
+MC_ITERATIONS = 2
+STATE_NOISE_SCALE = 1e-4          
+DOPPLER_NOISE_STD_HZ = 5.0       
 
 TLE_list = [
     "AWS",
@@ -34,11 +33,144 @@ TLE_list = [
 tle_base = TLE(data=TLE_list)
 epoch_unix = 1762207191
 
+# =========================================================
+# 2. Function Definitions
+# =========================================================
+def create_pass_chunks(t, d, c, passes_per_chunk=6, num_chunks=4):
+    """Splits the dataset into independent chunks based on contact indices."""
+    unique_passes = torch.unique(c)
+    chunks = []
+    
+    for i in range(num_chunks):
+        start_idx = i * passes_per_chunk
+        end_idx = start_idx + passes_per_chunk
+        
+        if end_idx > len(unique_passes):
+            print(f"Warning: Only enough data for {i} full chunks of {passes_per_chunk} passes.")
+            break
+            
+        chunk_passes = unique_passes[start_idx:end_idx]
+        mask = torch.isin(c, chunk_passes)
+        
+        chunks.append({
+            "chunk_id": i,
+            "t": t[mask],
+            "d_true": d[mask],
+            "c": c[mask],
+            "pass_ids": chunk_passes
+        })
+        
+    return chunks
+
+def run_doppler_od(
+    x_guess: torch.Tensor, 
+    t_obs: torch.Tensor, 
+    d_obs: torch.Tensor, 
+    c_obs: torch.Tensor,
+    ref_unix: float,
+    base_tle: list[str],
+    center_freq: float = 1707.0,
+    time_bias_sec: float = 0.277
+) -> tuple[torch.Tensor, torch.Tensor, object, object]:
+    """Runs Doppler-only OD and returns the state, covariance, SSV, and propagator."""
+    ssv_dopp = state.MEE_SSV(
+        init_tle=base_tle, 
+        num_measurements=len(t_obs),
+        fit_mean_motion=True, fit_f=False, fit_g=False,  
+        fit_h=False, fit_k=False, fit_L=True, fit_bstar=False
+    )
+    ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_obs)
+
+    t_ref_astropy = Time(ref_unix, format="unix", scale="utc")
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+        ref_unix=ref_unix, 
+        ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+        device=device
+    )
+
+    prop_dopp = system.SGP4(ssv=ssv_dopp)
+    meas_dopp = system.DopplerMeasurement(
+        ssv=ssv_dopp, station_model=station_model,
+        freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"), 
+        time_bias_group=None
+    )
+    pipe_dopp = system.MeasurementPipeline(propagator=prop_dopp, measurement_model=meas_dopp)
+
+    t_since_dopp_calibrated = (t_obs - ref_unix) + time_bias_sec
+
+    def forward_fn(x):
+        return pipe_dopp(x=x, tsince=t_since_dopp_calibrated, epoch=ref_unix, center_freq=center_freq)
+
+    # Note: ensure svd_solve returns the covariance matrix as the second argument
+    x_out, cov = svd_solve(
+        x_init=x_guess, y_obs_fixed=d_obs, forward_fn=forward_fn,
+        sigma_obs=20.0, estimate_mask=ssv_dopp.get_active_map(), num_steps=10
+    )
+    
+    return x_out, cov, ssv_dopp, prop_dopp
+
+
+def evaluate_forecast_metrics(
+    x_state: torch.Tensor, 
+    propagator: torch.nn.Module, 
+    t_gps: torch.Tensor, 
+    r_gps: torch.Tensor, 
+    v_gps: torch.Tensor, 
+    epoch_unix: float, 
+    t_end_obs: float
+) -> dict[str, float]:
+    """Computes 3D RMSE for specific prediction horizons past the last observation."""
+    metrics = {}
+    horizons = [(1, '1h'), (6, '6h'), (24, '24h')]
+    
+    for hours, label in horizons:
+        mask = (t_gps > t_end_obs) & (t_gps <= t_end_obs + hours * 3600)
+        
+        if mask.sum() == 0:
+            metrics[label] = np.nan
+            continue
+            
+        _, pos_ric, _ = compute_ric_residuals(
+            x_state=x_state, propagator=propagator,
+            t_gps=t_gps[mask], r_gps=r_gps[mask], v_gps=v_gps[mask], 
+            tle_epoch_unix=epoch_unix
+        )
+        
+        # Calculate full 3D RMSE: sqrt(mean(dx^2 + dy^2 + dz^2))
+        rms_3d = torch.sqrt(torch.mean(torch.sum(pos_ric**2, dim=1))).item()
+        metrics[label] = rms_3d
+        
+    return metrics
+
+# def evaluate_mc_ric_residuals(
+#     mc_states: list[torch.Tensor], propagator: torch.nn.Module, 
+#     t_gps_truth: torch.Tensor, r_gps_truth: torch.Tensor, 
+#     v_gps_truth: torch.Tensor, epoch: float
+# ):
+#     """Computes spatial errors (Radial, In-track, Cross-track) for a list of states against GPS truth."""
+#     all_pos_ric = []
+    
+#     for x_state in mc_states:
+#         _, pos_ric, _ = compute_ric_residuals(
+#             x_state=x_state, propagator=propagator,
+#             t_gps=t_gps_truth, r_gps=r_gps_truth, v_gps=v_gps_truth, tle_epoch_unix=epoch
+#         )
+#         all_pos_ric.append(pos_ric)
+
+#     ensemble_ric = torch.stack(all_pos_ric)
+#     grand_mean = torch.sqrt(torch.mean(ensemble_ric**2, dim=(0, 1)))
+#     grand_var = torch.var(ensemble_ric, dim=(0, 1))
+    
+#     return ensemble_ric, grand_mean, grand_var
+
+# =========================================================
+# 3. Data Loading
+# =========================================================
 print("Loading Synthetic Dataset & GPS Truth...")
 t_gps, r_gps, v_gps = load_gmat_csv_block_legacy(
     file_path="data/AWS_full_long_period.csv", 
-    tle_epoch_unix=epoch_unix,
-    block_sec=86400 * 2
+    tle_epoch_unix=epoch_unix, block_sec=86400 * 2
 )
 
 synthetic_telemetry = pl.read_parquet("data/synthetic_period_telemetry.parquet")
@@ -52,12 +184,10 @@ d_dopp_true = d_dopp_true[valid_mask]
 c_dopp = c_dopp[valid_mask]
 
 T_mean = float(torch.mean(t_gps))
-t_ref_astropy = Time(T_mean, format="unix", scale="utc")
 
-
-# ---------------------------------------------------------
+# =========================================================
 # PHASE 1: GPS-Based Baseline OD
-# ---------------------------------------------------------
+# =========================================================
 print("\n--- Phase 1: Fitting Baseline TLE to GPS ---")
 init_tle_gps, _ = dsgp4.newton_method(tle_base, unix_to_mjd(T_mean))
 
@@ -70,276 +200,113 @@ y_gps_1d = meas_gps.format_gps_observations(r_gps, v_gps)
 t_since_gps = (t_gps - T_mean) 
 
 x_gps_out, _ = svd_solve(
-    x_init=ssv_gps.get_initial_state(),
-    y_obs_fixed=y_gps_1d,
+    x_init=ssv_gps.get_initial_state(), y_obs_fixed=y_gps_1d,
     forward_fn=lambda x: pipe_gps(x=x, tsince=t_since_gps),
-    estimate_mask=ssv_gps.get_active_map(),
-    num_steps=5,
-    sigma_obs=1.0 
+    estimate_mask=ssv_gps.get_active_map(), num_steps=5, sigma_obs=1.0 
 )
 tle_gps_fit = ssv_gps.export(x_gps_out)
 
+# =========================================================
+# PHASE 2: Multi-Dimensional Monte Carlo Simulation
+# =========================================================
+print("\n--- Phase 2: Multi-Dimensional Epoch-Centered Simulation ---")
 
-# ---------------------------------------------------------
-# PHASE 2: Encapsulated Doppler OD Function
-# ---------------------------------------------------------
-def run_doppler_od(x_guess: torch.Tensor, doppler_obs: torch.Tensor) -> torch.Tensor:
-    """
-    Runs the Doppler-only Orbit Determination solving only for n, L, and frequency biases.
-    """
-    # 1. Setup State Vector
-    ssv_dopp = state.MEE_SSV(
-        init_tle=tle_gps_fit, 
-        num_measurements=len(t_dopp),
-        fit_mean_motion=True, 
-        fit_f=False, fit_g=False,  
-        fit_h=False, fit_k=False,  
-        fit_L=True,                
-        fit_bstar=False
-    )
-    ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
+data_chunks = create_pass_chunks(t_dopp, d_dopp_true, c_dopp, passes_per_chunk=6, num_chunks=4)
+passes_to_test = [1, 2, 3, 4, 5, 6]
+experiment_results = []
 
-    # 2. Setup Measurement Pipeline
-    station_model = system.DifferentiableStation(
-        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
-        ref_unix=T_mean, ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
-        device=device
-    )
-
-    prop_dopp = system.SGP4(ssv=ssv_dopp)
-    meas_dopp = system.DopplerMeasurement(
-        ssv=ssv_dopp, station_model=station_model,
-        freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"), time_bias_group=None
-    )
-    pipe_dopp = system.MeasurementPipeline(propagator=prop_dopp, measurement_model=meas_dopp)
-
-    t_since_dopp_calibrated = (t_dopp - T_mean) + KNOWN_GLOBAL_TIME_BIAS_SEC
-
-    def forward_fn(x):
-        return pipe_dopp(x=x, tsince=t_since_dopp_calibrated, epoch=T_mean, center_freq=center_freq)
-
-    # 3. Solve
-    x_out, _ = svd_solve(
-        x_init=x_guess,
-        y_obs_fixed=doppler_obs,
-        forward_fn=forward_fn,
-        sigma_obs=50.0, 
-        estimate_mask=ssv_dopp.get_active_map(),
-        num_steps=5
-    )
+for chunk in data_chunks:
+    print(f"\nProcessing Dataset Chunk {chunk['chunk_id']}...")
     
-    # We return the SSV object as well to extract active maps/indices later if needed
-    return x_out, ssv_dopp
-
-# ---------------------------------------------------------
-# PHASE 3: Monte Carlo Simulation
-# ---------------------------------------------------------
-print("\n--- Phase 3: Executing Monte Carlo Simulation ---")
-
-# First, we need the "clean" Doppler fit to establish the baseline dimensionality and expected output
-# We use the initial state from MEE_SSV initialized with the GPS fit as our standard starting point
-dummy_ssv = state.MEE_SSV(init_tle=tle_gps_fit, num_measurements=len(t_dopp), fit_mean_motion=True, fit_f=False, fit_g=False, fit_h=False, fit_k=False, fit_L=True, fit_bstar=False)
-dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
-standard_x_guess = dummy_ssv.get_initial_state()
-
-print("Calculating clean baseline...")
-x_clean_out, _ = run_doppler_od(x_guess=standard_x_guess, doppler_obs=d_dopp_true)
-n_idx = dummy_ssv.map_param_to_idx["n"]
-L_idx = dummy_ssv.map_param_to_idx["L"]
-
-n_clean = x_clean_out[n_idx].item()
-L_clean = x_clean_out[L_idx].item()
-
-mc_results_n = []
-mc_results_L = []
-mc_states = []
-
-for i in range(MC_ITERATIONS):
-    # 1. Perturb the initial state guess 
-    noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
-    x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
-    
-    # 2. Add White Noise to the "True" Synthetic Doppler Data
-    d_dopp_noisy = d_dopp_true + torch.randn_like(d_dopp_true) * DOPPLER_NOISE_STD_HZ
-    
-    # 3. Solve
-    x_mc_out, current_ssv = run_doppler_od(x_guess=x_noisy_guess, doppler_obs=d_dopp_noisy)
-    
-    # 4. Store the FULL state vector for spatial evaluation
-    mc_states.append(x_mc_out)
-    
-    if (i + 1) % 5 == 0:
-        print(f"Completed MC Iteration {i + 1}/{MC_ITERATIONS}")
-
-
-# ---------------------------------------------------------
-# 4. Analysis & Visualization
-# ---------------------------------------------------------
-# ---------------------------------------------------------
-# PHASE 4: Spatial Residual Evaluation (RIC)
-# ---------------------------------------------------------
-def evaluate_mc_ric_residuals(
-    mc_states: list[torch.Tensor], 
-    propagator: torch.nn.Module, 
-    t_gps_truth: torch.Tensor, 
-    r_gps_truth: torch.Tensor, 
-    v_gps_truth: torch.Tensor, 
-    epoch: float
-):
-    print("\n--- Phase 4: Computing Ensemble RIC Residuals ---")
-    all_pos_ric = []
-    
-    for i, x_state in enumerate(mc_states):
-        # compute_ric_residuals returns (t_mins, pos_ric_km, vel_ric_km)
-        _, pos_ric, _ = compute_ric_residuals(
-            x_state=x_state,
-            propagator=propagator,
-            t_gps=t_gps_truth,
-            r_gps=r_gps_truth,
-            v_gps=v_gps_truth,
-            tle_epoch_unix=epoch
-        )
-        all_pos_ric.append(pos_ric) # Shape: (N_gps_samples, 3)
-
-    # Stack into a single tensor of shape: (MC_Iterations, N_gps_samples, 3)
-    # Dimension 2 indices: 0 = Radial, 1 = In-track (Along-track), 2 = Cross-track
-    ensemble_ric = torch.stack(all_pos_ric)
-    
-    # Compute Grand Mean and Variance across both the MC ensemble and time domains
-    # We reduce over dim 0 (Iterations) and dim 1 (Time steps)
-    grand_mean = torch.sqrt(torch.mean(ensemble_ric**2, dim=(0, 1))) #/ len(ensemble_ric)
-    grand_var = torch.var(ensemble_ric, dim=(0, 1))
-    
-    print("\n--- Ensemble Spatial Error Statistics (km) ---")
-    print(f"{'Axis':<15} | {'Mean (km)':<12} | {'Variance (km^2)':<15} | {'Std Dev (km)':<12}")
-    print("-" * 62)
-    
-    axes = ["Radial", "In-track", "Cross-track"]
-    for i, axis in enumerate(axes):
-        mean_val = grand_mean[i].item()
-        var_val = grand_var[i].item()
-        std_val = torch.sqrt(grand_var[i]).item()
-        print(f"{axis:<15} | {mean_val:>12.6f} | {var_val:>15.6f} | {std_val:>12.6f}")
-
-    return ensemble_ric, grand_mean, grand_var
-
-# Execute the evaluation using the GPS propagator from Phase 1
-ensemble_ric_tensor, g_mean, g_var = evaluate_mc_ric_residuals(
-    mc_states=mc_states,
-    propagator=prop_gps, # The SGP4 propagator initialized for the truth baseline
-    t_gps_truth=t_gps,
-    r_gps_truth=r_gps,
-    v_gps_truth=v_gps,
-    epoch=T_mean
-)
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-def plot_mc_uncertainty_dashboard(
-    ensemble_ric: torch.Tensor, 
-    t_gps: torch.Tensor, 
-    mc_results_n: list[float], 
-    mc_results_L: list[float]
-):
-    print("\n--- Generating Uncertainty Dashboard ---")
-    
-    # ---------------------------------------------------------
-    # 1. Data Processing
-    # ---------------------------------------------------------
-    # Time axis in hours from the start of the epoch for readability
-    t_hours = (t_gps - t_gps[0]).cpu().numpy() / 3600.0
-    
-    # Calculate Time-Series Statistics across the MC dimension (dim=0)
-    # Shapes will be (N_timepoints, 3)
-    ric_mean = torch.mean(ensemble_ric, dim=0).cpu().numpy()
-    ric_std = torch.std(ensemble_ric, dim=0).cpu().numpy()
-    
-    # Calculate Spatial RMS per MC Iteration for the Boxplots
-    # Shape transitions to (MC_Iterations, 3)
-    ric_rms_per_iter = torch.sqrt(torch.mean(ensemble_ric**2, dim=1)).cpu().numpy()
-    
-    n_array = np.array(mc_results_n)
-    L_array = np.array(mc_results_L)
-
-    # ---------------------------------------------------------
-    # 2. Figure Setup
-    # ---------------------------------------------------------
-    fig = plt.figure(figsize=(16, 10))
-    gs = fig.add_gridspec(3, 4, wspace=0.3, hspace=0.4)
-    
-    # --- Plot A: 3D Spatial Confidence Bounds Over Time ---
-    ax_rad = fig.add_subplot(gs[0, :2])
-    ax_int = fig.add_subplot(gs[1, :2])
-    ax_cross = fig.add_subplot(gs[2, :2])
-    
-    time_axes = [ax_rad, ax_int, ax_cross]
-    labels = ['Radial (km)', 'In-track (km)', 'Cross-track (km)']
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    
-    for i in range(3):
-        ax = time_axes[i]
-        mean_val = ric_mean[:, i]
-        std_val = ric_std[:, i]
+    for num_passes in passes_to_test:
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
         
-        # Plot the ensemble mean
-        ax.plot(t_hours, mean_val, color=colors[i], label='Ensemble Mean')
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
         
-        # Plot the 3-sigma uncertainty blob
-        ax.fill_between(
-            t_hours, 
-            mean_val - 3 * std_val, 
-            mean_val + 3 * std_val, 
-            color=colors[i], alpha=0.2, label=r'$\pm 3\sigma$ Bound'
-        )
+        # 1. Shift the reference epoch to the center of this specific observation window
+        t_mean_window = float(torch.mean(t_active))
+        t_end_window = float(t_active[-1])
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
         
-        ax.axhline(0, color='black', linestyle='--', linewidth=0.8)
-        ax.set_ylabel(labels[i])
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.set_title("Spatial Uncertainty Envelopes Over Time")
-            ax.legend(loc='upper right')
-        if i == 2:
-            ax.set_xlabel("Time since start of trajectory (Hours)")
+        dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True)
+        dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        standard_x_guess = dummy_ssv.get_initial_state()
+        
+        mc_metrics = {'1h': [], '6h': [], '24h': [], 'frob': []}
+        
+        for i in range(MC_ITERATIONS):
+            noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
+            x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
+            d_active_noisy = d_active_true + torch.randn_like(d_active_true) * DOPPLER_NOISE_STD_HZ
             
-    # --- Plot B: Spatial RMS Boxplots ---
-    ax_box_spat = fig.add_subplot(gs[0:2, 2:])
-    ax_box_spat.boxplot(
-        [ric_rms_per_iter[:, 0], ric_rms_per_iter[:, 1], ric_rms_per_iter[:, 2]],
-        labels=['Radial', 'In-track', 'Cross-track'],
-        patch_artist=True,
-        boxprops=dict(color='lightgray', alpha=0.6),
-        medianprops=dict(color='red', linewidth=2)
-    )
-    ax_box_spat.set_title("Distribution of Spatial RMS Errors\n(Across Monte Carlo Iterations)")
-    ax_box_spat.set_ylabel("RMS Error (km)")
-    ax_box_spat.grid(True, axis='y', alpha=0.3)
+            x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
+                x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
+                ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC
+            )
+            
+            # Record Frobenius Norm of Covariance
+            mc_metrics['frob'].append(torch.linalg.matrix_norm(cov_mc, ord='fro').item())
+            
+            # Evaluate Forecast
+            metrics = evaluate_forecast_metrics(
+                x_state=x_mc_out, propagator=prop_mc,
+                t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+                epoch_unix=t_mean_window, t_end_obs=t_end_window
+            )
+            for k in ['1h', '6h', '24h']:
+                mc_metrics[k].append(metrics[k])
+                
+        # Aggregate MC metrics into the final output
+        experiment_results.append({
+            "chunk_id": chunk["chunk_id"],
+            "num_passes": num_passes,
+            "1h_rmse": np.nanmean(mc_metrics['1h']),
+            "6h_rmse": np.nanmean(mc_metrics['6h']),
+            "24h_rmse": np.nanmean(mc_metrics['24h']),
+            "cov_frob": np.nanmean(mc_metrics['frob'])
+        })
+        
+        print(f"  -> Passes: {num_passes} | 1h RMSE: {np.nanmean(mc_metrics['1h']):.2f} km | 24h RMSE: {np.nanmean(mc_metrics['24h']):.2f} km")
 
-    # --- Plot C: Parameter Boxplots ---
-    # Because n and L have completely different scales and physical units, 
-    # it's best to split them into two separate side-by-side boxplots.
-    ax_box_n = fig.add_subplot(gs[2, 2])
-    ax_box_n.boxplot(n_array, labels=['Mean Motion ($n$)'], widths=0.5,
-                     boxprops=dict(color='#1f77b4', alpha=0.6))
-    ax_box_n.set_ylabel("Revs / Day")
-    ax_box_n.grid(True, axis='y', alpha=0.3)
+def plot_cross_validation(results: list[dict]):
+    """Generates cross-validated bar plots for OD performance metrics."""
+    df = pl.DataFrame(results)
+    passes = sorted(df["num_passes"].unique().to_list())
+    chunks = sorted(df["chunk_id"].unique().to_list())
     
-    ax_box_L = fig.add_subplot(gs[2, 3])
-    ax_box_L.boxplot(L_array, labels=['Mean Longitude ($L$)'], widths=0.5,
-                     boxprops=dict(color='#ff7f0e', alpha=0.6))
-    ax_box_L.set_ylabel("Radians")
-    ax_box_L.grid(True, axis='y', alpha=0.3)
-
-    plt.suptitle("Monte Carlo Orbit Determination Analysis", fontsize=16, y=0.95)
+    metrics_to_plot = [
+        ("1h_rmse", "1-Hour Forecast RMSE (km)"),
+        ("24h_rmse", "24-Hour Forecast RMSE (km)"),
+        ("cov_frob", "Covariance Frobenius Norm")
+    ]
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    bar_width = 0.8 / len(chunks)
+    
+    for ax, (metric_key, title) in zip(axes, metrics_to_plot):
+        for i, chunk_id in enumerate(chunks):
+            chunk_data = df.filter(pl.col("chunk_id") == chunk_id).sort("num_passes")
+            x_offsets = np.arange(len(passes)) + (i * bar_width) - (0.4 - bar_width/2)
+            
+            y_vals = chunk_data[metric_key].to_numpy()
+            ax.bar(x_offsets, y_vals, width=bar_width, label=f"Segment {chunk_id}", alpha=0.8)
+            
+        ax.set_title(title)
+        ax.set_xlabel("Number of Passes")
+        ax.set_xticks(np.arange(len(passes)))
+        ax.set_xticklabels(passes)
+        ax.grid(axis='y', linestyle='--', alpha=0.6)
+        
+        # Add a logarithmic scale if plotting the Frobenius norm
+        if "Covariance" in title:
+            ax.set_yscale('log')
+            
+    axes[-1].legend(title="Data Segments")
+    plt.tight_layout()
     plt.show()
 
-# ---------------------------------------------------------
-# Execute the Dashboard
-# ---------------------------------------------------------
-# Assuming ensemble_ric_tensor is returned from the previous Phase 4 step
-plot_mc_uncertainty_dashboard(
-    ensemble_ric=ensemble_ric_tensor,
-    t_gps=t_gps,
-    mc_results_n=mc_results_n,
-    mc_results_L=mc_results_L
-)
+# Execute plotting
+plot_cross_validation(experiment_results)

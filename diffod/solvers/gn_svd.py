@@ -65,7 +65,7 @@ def svd_solve(
         # 1. Compute Model and Jacobian
         y_model = forward_fn(x)
 
-        print(x)
+        # print(x)
 
         # Jacobian wrt full state x
         J_full = jacfwd(forward_fn)(x)
