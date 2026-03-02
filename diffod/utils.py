@@ -455,3 +455,43 @@ def propagate_mee_covariance(
     P_new = Phi @ P_old @ Phi.T
     
     return P_new
+
+# from torch.func import jacfwd
+
+def compute_observability_metrics(
+    x_state: torch.Tensor, 
+    forward_fn: callable, 
+    d_obs_fixed: torch.Tensor, 
+    sigma_obs: float = 20.0,
+    param_names: list[str] = ["n", "f", "g", "h", "k", "L", "B*"]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Computes the Fisher Information Matrix (FIM) and its eigensystem.
+    """
+    # 1. Compute the Full Jacobian
+    def res_fn(state):
+        return forward_fn(state) - d_obs_fixed
+        
+    H_total = jacfwd(res_fn)(x_state)
+    
+    # 2. Isolate the Orbital Parameters (ignore biases for this analysis)
+    num_orb = len(param_names)
+    H_orb = H_total[:, :num_orb]
+    
+    # 3. Compute Fisher Information Matrix (FIM = H^T * W * H)
+    W = 1.0 / (sigma_obs**2)
+    FIM = H_orb.T @ (H_orb * W)
+    
+    # 4. Extract Marginal Information (Raw observability per parameter)
+    marginal_info = torch.diag(FIM)
+    
+    # 5. Unit-Normalized FIM for Eigenvalue Analysis
+    # We pre- and post-multiply by the inverse square root of the diagonal
+    # to create a dimensionless pseudo-correlation matrix.
+    diag_inv_sqrt = torch.diag(1.0 / torch.sqrt(marginal_info + 1e-16))
+    FIM_normalized = diag_inv_sqrt @ FIM @ diag_inv_sqrt
+    
+    # 6. Compute Eigensystem on the normalized matrix
+    evals, evecs = torch.linalg.eigh(FIM_normalized)
+    
+    return marginal_info.detach().cpu().numpy(), evals.detach().cpu().numpy(), evecs.detach().cpu().numpy()

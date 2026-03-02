@@ -30,7 +30,7 @@ def solve_gn_step_svd(
     
     dx = dx_tilde / col_norms
 
-    print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
+    # print(f"Update Norm: {torch.linalg.norm(dx):.6e}")
     
     # Covariance estimate via pseudoinverse of the Jacobian
     # P = (J^T J)^-1  => P = V (Sigma^-2) V^T

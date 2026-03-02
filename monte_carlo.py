@@ -9,7 +9,7 @@ from astropy.time import Time
 # Internal diffod modules
 import diffod.state as state
 import diffod.functional.system as system
-from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, parameter_covariance_propagation, extract_cca_priors
+from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, compute_observability_metrics
 from diffod.visualize import compute_ric_residuals, plot_segment_ric_residuals, plot_cross_validation
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.cca import cca_solve
@@ -23,7 +23,7 @@ center_freq = 1707.0
 
 KNOWN_GLOBAL_TIME_BIAS_SEC = 0.277  
 MC_ITERATIONS = 1
-STATE_NOISE_SCALE = 1e-4          
+STATE_NOISE_SCALE = 1e-4       
 DOPPLER_NOISE_STD_HZ = 5.0       
 
 TLE_list = [
@@ -278,7 +278,7 @@ for chunk in data_chunks:
         t_end_window = float(t_active[-1])
         tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
         
-        dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True)
+        dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), fit_mean_motion=True, fit_L=True, fit_f=True)
         dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
         standard_x_guess = dummy_ssv.get_initial_state()
         
@@ -336,3 +336,88 @@ for chunk in data_chunks:
 plot_cross_validation(experiment_results)
 
 plot_segment_ric_residuals(segment_ric_trajectories)
+
+def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
+    print("\n--- Analyzing Parameter Observability ---")
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    passes_to_test = [1, 2, 3, 4, 5, 6]
+    
+    # We will just analyze the first chunk for clarity
+    chunk = data_chunks[0]
+    
+    marginal_info_history = {p: [] for p in param_names}
+    condition_number_history = []
+    
+    for num_passes in passes_to_test:
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
+        
+        t_mean_window = float(torch.mean(t_active))
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        
+        # Setup pipeline strictly for the forward pass
+        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        x_eval = eval_ssv.get_initial_state()
+        
+        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+        station_model = system.DifferentiableStation(
+            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+            ref_unix=t_mean_window, 
+            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+            device=device
+        )
+        
+        prop_eval = system.SGP4(ssv=eval_ssv)
+        meas_eval = system.DopplerMeasurement(
+            ssv=eval_ssv, station_model=station_model,
+            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+        )
+        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+        
+        t_since = (t_active - t_mean_window) + KNOWN_GLOBAL_TIME_BIAS_SEC
+        
+        def forward_fn(x):
+            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
+            
+        marg_info, evals, _ = compute_observability_metrics(
+            x_state=x_eval, forward_fn=forward_fn, 
+            d_obs_fixed=d_active_true, sigma_obs=20.0, param_names=param_names
+        )
+        
+        for i, p in enumerate(param_names):
+            marginal_info_history[p].append(marg_info[i])
+            
+        # The condition number of the normalized FIM shows if the full state is theoretically solvable
+        condition_number_history.append(evals[-1] / (evals[0] + 1e-16))
+        
+    # --- Plotting ---
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    for p in param_names:
+        # Plotting on a log scale because n and L will vastly outpace B* and eccentricity
+        axes[0].plot(passes_to_test, marginal_info_history[p], marker='o', label=p, linewidth=2)
+        
+    axes[0].set_yscale('log')
+    axes[0].set_title("Marginal Fisher Information per Parameter")
+    axes[0].set_xlabel("Number of Passes")
+    axes[0].set_ylabel("Information Content (Log Scale)")
+    axes[0].grid(True, linestyle='--', alpha=0.6)
+    axes[0].legend(loc='lower right')
+    
+    axes[1].plot(passes_to_test, condition_number_history, marker='s', color='red', linewidth=2)
+    axes[1].set_yscale('log')
+    axes[1].set_title("Condition Number of Normalized FIM")
+    axes[1].set_xlabel("Number of Passes")
+    axes[1].set_ylabel("Condition Number (Lower = More Solvable)")
+    axes[1].grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Run the analysis
+plot_observability_growth(data_chunks, T_mean, tle_base, center_freq)
