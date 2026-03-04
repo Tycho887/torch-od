@@ -1,3 +1,4 @@
+from astropy import conf
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -52,6 +53,54 @@ def compute_ric_residuals(
     vel_ric = torch.cat([vel_res_R, vel_res_A, vel_res_C], dim=1)
 
     return t_since_mins, pos_ric, vel_ric
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+
+import matplotlib.pyplot as plt
+import torch
+
+def plot_single_orbit_ric_residuals(
+    t_mins: torch.Tensor, 
+    pos_ric: torch.Tensor, 
+    vel_ric: torch.Tensor,
+    title: str = "6-Pass 2-DOF Estimator: RIC Residuals Post-Fit"
+):
+    """
+    Plots the raw RIC position and velocity residuals for a single computed orbit.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=True)
+    components = ['Radial', 'In-track', 'Cross-track']
+    
+    # Convert tensors to numpy arrays and minutes to hours
+    t_hours = t_mins.detach().cpu().numpy() / 60.0
+    pos_np = pos_ric.detach().cpu().numpy()
+    vel_np = vel_ric.detach().cpu().numpy()
+    
+    # Use distinct colors for each axis to make it visually appealing
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c'] 
+    
+    for i in range(3):
+        # Position Row
+        axes[0, i].plot(t_hours, pos_np[:, i], color=colors[i], linewidth=2)
+        axes[0, i].set_title(f'{components[i]} Error')
+        axes[0, i].grid(True, linestyle='--', alpha=0.6)
+        axes[0, i].axhline(0, color='black', linewidth=1, linestyle='-') # Add a zero-line
+        
+        # Velocity Row
+        axes[1, i].plot(t_hours, vel_np[:, i], color=colors[i], linewidth=2)
+        axes[1, i].grid(True, linestyle='--', alpha=0.6)
+        axes[1, i].axhline(0, color='black', linewidth=1, linestyle='-')
+        axes[1, i].set_xlabel('Time Since Fit Epoch (Hours)')
+        
+    # Set y-labels only on the first column to save space
+    axes[0, 0].set_ylabel('Position Error (km)')
+    axes[1, 0].set_ylabel('Velocity Error (km/s)')
+    
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    plt.show()
 
 def print_ric_residual_summary(results_dict: dict[str, tuple[torch.Tensor, torch.Tensor]]):
     """
@@ -571,7 +620,7 @@ import seaborn as sns
 
 def plot_dof_forecast_trends(results: list[dict]):
     """Plots the RMSE trends vs passes, separated by DOF configuration."""
-    df = pl.DataFrame(results).filter(pl.col("num_passes") > 0).to_pandas()
+    df = pl.DataFrame(results).filter(pl.col("num_passes") >= 0).to_pandas()
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharex=True)
     
@@ -602,7 +651,7 @@ def plot_dof_forecast_trends(results: list[dict]):
 def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
     print("\n--- Analyzing Parameter Observability ---")
     param_names = ["n", "f", "g", "h", "k", "L", "B*"]
-    passes_to_test = [1, 2, 3, 4, 5, 6]
+    passes_to_test = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     
     # We will just analyze the first chunk for clarity
     chunk = data_chunks[0]
@@ -680,4 +729,302 @@ def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
     plt.tight_layout()
     plt.show()
 
-# Run the analysis
+def plot_ric_error_propagation(
+    trajectory_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    title: str = "6-Pass Estimator: 24-Hour RIC Error Propagation"
+):
+    """
+    Plots the absolute RIC position and velocity errors over time.
+    Expects trajectory_dict to map 'Configuration Name' -> (t_mins, pos_ric, vel_ric).
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10), sharex=True)
+    components = ['Radial', 'In-track', 'Cross-track']
+    
+    # Use a standard colormap to dynamically handle multiple configurations
+    colors = plt.cm.tab10.colors 
+
+    for idx, (name, (t_mins, pos_ric, vel_ric)) in enumerate(trajectory_dict.items()):
+        
+        # Calculate absolute error (equivalent to RMSE for a single realization)
+        pos_err = np.abs(pos_ric.detach().cpu().numpy())
+        vel_err = np.abs(vel_ric.detach().cpu().numpy())
+        
+        # t_mins is already relative to the fit epoch, just convert to hours
+        t_plot_hours = t_mins.detach().cpu().numpy() / 60.0 
+        
+        style = {"color": colors[idx % len(colors)], "linestyle": "-", "alpha": 0.8, "linewidth": 2}
+
+        for i in range(3):
+            axes[0, i].plot(t_plot_hours, pos_err[:, i], label=name, **style)
+            axes[1, i].plot(t_plot_hours, vel_err[:, i], label=name, **style)
+
+    for i, comp in enumerate(components):
+        axes[0, i].set_title(f'{comp} Error Magnitude')
+        axes[0, i].set_ylabel('Position Error (km)' if i == 0 else '')
+        axes[1, i].set_ylabel('Velocity Error (km/s)' if i == 0 else '')
+        axes[1, i].set_xlabel('Time Since Fit Epoch (Hours)')
+        
+        for row in range(2):
+            axes[row, i].grid(True, linestyle='--', alpha=0.6)
+            if i == 0 and row == 0:
+                axes[row, i].legend(loc='upper left')
+                
+            # Optional: Uncomment if error grows by orders of magnitude and becomes hard to read
+            # axes[row, i].set_yscale('log')
+
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+def plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=3):
+    """
+    Performs a PCA-equivalent eigendecomposition on the normalized Fisher 
+    Information Matrix to show the dominance of specific MEE parameters.
+    """
+    param_names = ["n", "f", "g", "L"]
+    chunk = data_chunks[0]
+    
+    # 1. Setup the 3-pass data
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    
+    t_mean_window = float(torch.mean(t_active))
+    tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    
+    # 2. Initialize SSV and Forward Model
+    eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+        ref_unix=t_mean_window, 
+        ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+        # device=device
+    )
+    
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model,
+        freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since = (t_active - t_mean_window) + 0.277
+    
+    def forward_fn(x):
+        return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
+        
+    # 3. Compute Observability (Eigendecomposition of Normalized FIM)
+    _, evals, evecs = compute_observability_metrics(
+        x_state=x_eval, forward_fn=forward_fn, 
+        d_obs_fixed=d_active_true, sigma_obs=20.0, param_names=param_names
+    )
+    
+    # Sort eigenvalues/eigenvectors in descending order (Largest Information -> Smallest)
+    idx = np.argsort(evals)[::-1]
+    evals = evals[idx]
+    evecs = evecs[:, idx]
+    
+    # Calculate Explained Information Ratio (PCA equivalent)
+    explained_info_ratio = evals / np.sum(evals)
+    cumulative_info = np.cumsum(explained_info_ratio)
+    
+    # Calculate the fractional contribution of each parameter to each Principal Component
+    # We square the eigenvectors to get the variance/information magnitude
+    pc_composition = evecs**2
+    
+    # 4. Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot A: Scree Plot (Explained Information)
+    axes[0].bar(range(1, len(evals)+1), explained_info_ratio * 100, alpha=0.7, label="Individual PC")
+    axes[0].plot(range(1, len(evals)+1), cumulative_info * 100, marker='o', color='red', label="Cumulative")
+    axes[0].set_title(f"PCA of Information Space ({num_passes} Passes)")
+    axes[0].set_xlabel("Principal Component (PC)")
+    axes[0].set_ylabel("Explained Information (%)")
+    axes[0].set_xticks(range(1, len(evals)+1))
+    axes[0].legend()
+    axes[0].grid(True, linestyle='--', alpha=0.6)
+    
+    # Plot B: Heatmap of PC Composition
+    sns.heatmap(
+        pc_composition.T, 
+        annot=True, 
+        cmap="YlGnBu", 
+        xticklabels=param_names,
+        yticklabels=[f"PC {i+1}" for i in range(len(evals))],
+        ax=axes[1],
+        fmt=".2f"
+    )
+    axes[1].set_title("Parameter Composition of Principal Components")
+    axes[1].set_xlabel("Modified Equinoctial Elements")
+    axes[1].set_ylabel("Principal Components")
+    
+    plt.tight_layout()
+    plt.show()
+
+from torch.func import jacfwd
+
+def plot_parameter_correlation_evolution(data_chunks, tle_base, center_freq, passes_to_plot=[1, 3, 8]):
+    """
+    Plots the parameter correlation matrix for different numbers of passes
+    to show how parameter coupling changes as more data is introduced.
+    """
+    param_names = ["n", "L"]#, "g", "h", "k", "L", "B*"]
+    num_params = len(param_names)
+    chunk = data_chunks[0]
+    
+    # Setup the figure for multiple subplots
+    fig, axes = plt.subplots(1, len(passes_to_plot), figsize=(6 * len(passes_to_plot), 5.5))
+    
+    for idx, num_passes in enumerate(passes_to_plot):
+        # 1. Setup the data for N passes
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
+        
+        t_mean_window = float(torch.mean(t_active))
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        
+        # 2. Initialize SSV and Forward Model
+        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        x_eval = eval_ssv.get_initial_state()
+        
+        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+        station_model = system.DifferentiableStation(
+            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+            ref_unix=t_mean_window, 
+            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+            # device=device # Uncomment if running strictly on GPU
+        )
+        
+        prop_eval = system.SGP4(ssv=eval_ssv)
+        meas_eval = system.DopplerMeasurement(
+            ssv=eval_ssv, station_model=station_model,
+            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+        )
+        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+        t_since = (t_active - t_mean_window) + 0.277
+        
+        # 3. Compute Jacobian directly
+        def res_fn(x):
+            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq) - d_active_true
+            
+        H_total = jacfwd(res_fn)(x_eval)
+        
+        # Isolate the orbital parameters (ignore bias parameters)
+        H_orb = H_total[:, :num_params]
+        
+        # 4. Compute FIM, Covariance, and Correlation
+        sigma_obs = 20.0
+        W = 1.0 / (sigma_obs**2)
+        FIM = H_orb.T @ (H_orb * W)
+        
+        # Use pseudo-inverse to handle singularity at low pass counts
+        Cov = torch.linalg.pinv(FIM)
+        
+        # Extract standard deviations (sqrt of diagonal elements)
+        std_dev = torch.sqrt(torch.abs(torch.diag(Cov)))
+        
+        # Compute Correlation Matrix: C_ij = Cov_ij / (std_i * std_j)
+        # Add a tiny epsilon to prevent division by zero for totally unobservable states
+        outer_std = torch.outer(std_dev, std_dev) + 1e-16
+        Corr = Cov / outer_std
+        
+        # Convert to numpy for Seaborn
+        Corr_np = Corr.detach().cpu().numpy()
+        
+        # Calculate the Distance to Orthogonality (Frobenius norm of off-diagonals)
+        # identity = np.eye(num_params)
+        frob_norm_off_diag = np.linalg.det(Corr_np)
+        
+        # 5. Plotting
+        ax = axes[idx] if len(passes_to_plot) > 1 else axes
+        sns.heatmap(
+            Corr_np, 
+            annot=True, 
+            cmap="coolwarm", 
+            vmin=-1, vmax=1, 
+            xticklabels=param_names,
+            yticklabels=param_names,
+            fmt=".2f",
+            ax=ax,
+            square=True,
+            cbar_kws={"shrink": .8}
+        )
+        # Update the title to include the metric
+        ax.set_title(f"{num_passes} Passes | $\|det(C)\|_F = {frob_norm_off_diag:.2f}$")
+        ax.set_xlabel("Modified Equinoctial Elements")
+        if idx == 0:
+            ax.set_ylabel("Modified Equinoctial Elements")
+
+    plt.tight_layout()
+    plt.show()
+
+import polars as pl
+import pandas as pd
+
+def generate_rmse_statistics_table(results: list[dict], horizons=["1h", "24h"]):
+    """
+    Generates a formatted table showing the Mean ± Std Dev of RMSE 
+    for different DOF configurations and number of passes.
+    """
+    # 1. Load results into Polars
+    df = pl.DataFrame(results)
+    
+    # Filter out baseline runs if you only want to compare active OD configs
+    df = df.filter(pl.col("num_passes") > 0)
+    
+    # 2. Build the aggregation expressions dynamically based on requested horizons
+    agg_exprs = []
+    for h in horizons:
+        col_name = f"{h}_rmse"
+        agg_exprs.extend([
+            pl.col(col_name).mean().alias(f"{h}_mean"),
+            pl.col(col_name).std().alias(f"{h}_std")
+        ])
+        
+    # Group by passes and configuration, aggregating across all chunks and MC iterations
+    agg_df = df.group_by(["num_passes", "dof_config"]).agg(agg_exprs).sort(["num_passes", "dof_config"])
+    
+    # 3. Convert to Pandas for string formatting and multi-index pivoting
+    pdf = agg_df.to_pandas()
+    
+    # Create the 'Mean ± Std' strings
+    for h in horizons:
+        pdf[f"{h} Forecast (km)"] = pdf.apply(
+            lambda row: f"{row[f'{h}_mean']:.2f} ± {row[f'{h}_std']:.2f}", axis=1
+        )
+    
+    # Keep only the formatted columns
+    cols_to_keep = ["num_passes", "dof_config"] + [f"{h} Forecast (km)" for h in horizons]
+    pdf = pdf[cols_to_keep]
+    
+    # 4. Pivot the table: Rows = passes, Columns = Configurations and Horizons
+    pivot_df = pdf.pivot(
+        index="num_passes", 
+        columns="dof_config", 
+        values=[f"{h} Forecast (km)" for h in horizons]
+    )
+    
+    # Flatten the MultiIndex columns for a cleaner look
+    # E.g., ('1h Forecast (km)', '2-DOF (n, L)') -> '2-DOF (n, L) | 1h Forecast (km)'
+    pivot_df.columns = [f"{config} | {metric}" for metric, config in pivot_df.columns]
+    
+    # Ensure rows are sorted by pass count
+    pivot_df = pivot_df.sort_index()
+    
+    return pivot_df
+
+# Example execution:
+# summary_table = generate_rmse_statistics_table(experiment_results, horizons=["1h", "24h"])
+# print(summary_table)
