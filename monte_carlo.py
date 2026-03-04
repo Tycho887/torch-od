@@ -10,7 +10,7 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, parameter_covariance_propagation, extract_cca_priors
-from diffod.visualize import compute_ric_residuals, plot_pca_information_space, plot_single_orbit_ric_residuals, plot_parameter_correlation_evolution, plot_dof_forecast_trends, plot_ric_error_propagation
+from diffod.visualize import compute_ric_residuals, plot_pca_information_space, plot_dof_correlation_comparison, plot_dof_forecast_trends, plot_ric_error_propagation
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.cca import cca_solve
 
@@ -362,11 +362,11 @@ segment_ric_trajectories = {}
 #     t_mins, pos_ric, vel_ric = target_trajectory
 #     plot_single_orbit_ric_residuals(t_mins, pos_ric, vel_ric)# plot_segment_ric_residuals(segment_ric_trajectories)
 # plot_median_forecast_trends(experiment_results)
-plot_parameter_correlation_evolution(data_chunks=data_chunks, tle_base=tle_base, center_freq=center_freq, passes_to_plot=[1, 3, 8])
+plot_dof_correlation_comparison(data_chunks, tle_base, center_freq, num_passes=4)
 # plot_pca_information_space(experiment_results))
 
 # plot_observability_growth(data_chunks, T_mean, tle_base, center_freq)
-plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=6)
+plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=4)
 
 # summary_table = generate_rmse_statistics_table(results=experiment_results, horizons=["1h", "24h"])
 # summary_table.to_csv("simulation_data")

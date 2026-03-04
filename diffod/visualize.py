@@ -781,7 +781,7 @@ def plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=3)
     Performs a PCA-equivalent eigendecomposition on the normalized Fisher 
     Information Matrix to show the dominance of specific MEE parameters.
     """
-    param_names = ["n", "f", "g", "L"]
+    param_names = ["n", "L", "g", "f"]
     chunk = data_chunks[0]
     
     # 1. Setup the 3-pass data
@@ -870,85 +870,97 @@ def plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=3)
 
 from torch.func import jacfwd
 
-def plot_parameter_correlation_evolution(data_chunks, tle_base, center_freq, passes_to_plot=[1, 3, 8]):
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+from astropy.time import Time
+from torch.func import jacfwd
+import dsgp4
+
+def plot_dof_correlation_comparison(data_chunks, tle_base, center_freq, num_passes=2):
     """
-    Plots the parameter correlation matrix for different numbers of passes
-    to show how parameter coupling changes as more data is introduced.
+    Plots the parameter correlation matrix for different DOF configurations
+    (2, 3, and 4 parameters) at a fixed number of passes.
     """
-    param_names = ["n", "L"]#, "g", "h", "k", "L", "B*"]
-    num_params = len(param_names)
+    # 1. Define the configurations to compare.
+    # Format: (Title, Parameter Labels, Jacobian Column Indices)
+    # The standard MEE_SSV order is: [n(0), f(1), g(2), h(3), k(4), L(5), B*(6)]
+    configs = [
+        ("2-DOF", ["n", "L"], [0, 5]),
+        ("3-DOF", ["n", "L", "g"], [0, 5, 2]),
+        ("4-DOF", ["n", "L", "f", "g"], [0, 5, 1, 2])
+    ]
+    
     chunk = data_chunks[0]
     
-    # Setup the figure for multiple subplots
-    fig, axes = plt.subplots(1, len(passes_to_plot), figsize=(6 * len(passes_to_plot), 5.5))
+    # 2. Setup the data for the fixed number of passes
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
     
-    for idx, num_passes in enumerate(passes_to_plot):
-        # 1. Setup the data for N passes
-        active_pass_ids = chunk["pass_ids"][:num_passes]
-        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    
+    t_mean_window = float(torch.mean(t_active))
+    tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    
+    # Setup the figure for multiple subplots
+    fig, axes = plt.subplots(1, len(configs), figsize=(6 * len(configs), 5.5))
+    
+    # 3. Base Evaluation Setup (Initialize full state to get the full Jacobian)
+    eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+        ref_unix=t_mean_window, 
+        ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+        # device=device # Uncomment if running strictly on GPU
+    )
+    
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model,
+        freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since = (t_active - t_mean_window) + 0.277
+    
+    # 4. Compute Full Jacobian ONCE
+    def res_fn(x):
+        return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq) - d_active_true
         
-        t_active = chunk["t"][pass_mask]
-        d_active_true = chunk["d_true"][pass_mask]
-        c_active = chunk["c"][pass_mask]
+    H_total = jacfwd(res_fn)(x_eval)
+    
+    # 5. Loop through configs and slice the Jacobian dynamically
+    for idx, (title, param_names, col_indices) in enumerate(configs):
         
-        t_mean_window = float(torch.mean(t_active))
-        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        # Isolate only the specified parameters
+        H_orb = H_total[:, col_indices]
         
-        # 2. Initialize SSV and Forward Model
-        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
-        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
-        x_eval = eval_ssv.get_initial_state()
-        
-        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
-        station_model = system.DifferentiableStation(
-            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
-            ref_unix=t_mean_window, 
-            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
-            # device=device # Uncomment if running strictly on GPU
-        )
-        
-        prop_eval = system.SGP4(ssv=eval_ssv)
-        meas_eval = system.DopplerMeasurement(
-            ssv=eval_ssv, station_model=station_model,
-            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
-        )
-        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
-        t_since = (t_active - t_mean_window) + 0.277
-        
-        # 3. Compute Jacobian directly
-        def res_fn(x):
-            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq) - d_active_true
-            
-        H_total = jacfwd(res_fn)(x_eval)
-        
-        # Isolate the orbital parameters (ignore bias parameters)
-        H_orb = H_total[:, :num_params]
-        
-        # 4. Compute FIM, Covariance, and Correlation
+        # Compute FIM, Covariance, and Correlation
         sigma_obs = 20.0
         W = 1.0 / (sigma_obs**2)
         FIM = H_orb.T @ (H_orb * W)
         
-        # Use pseudo-inverse to handle singularity at low pass counts
+        # Use pseudo-inverse
         Cov = torch.linalg.pinv(FIM)
         
-        # Extract standard deviations (sqrt of diagonal elements)
         std_dev = torch.sqrt(torch.abs(torch.diag(Cov)))
         
-        # Compute Correlation Matrix: C_ij = Cov_ij / (std_i * std_j)
-        # Add a tiny epsilon to prevent division by zero for totally unobservable states
         outer_std = torch.outer(std_dev, std_dev) + 1e-16
         Corr = Cov / outer_std
         
-        # Convert to numpy for Seaborn
         Corr_np = Corr.detach().cpu().numpy()
         
-        # Calculate the Distance to Orthogonality (Frobenius norm of off-diagonals)
-        # identity = np.eye(num_params)
-        frob_norm_off_diag = np.linalg.det(Corr_np)
+        # Calculate the Determinant (Generalized Variance)
+        det_C = np.linalg.det(Corr_np)
         
-        # 5. Plotting
-        ax = axes[idx] if len(passes_to_plot) > 1 else axes
+        # 6. Plotting
+        ax = axes[idx] if len(configs) > 1 else axes
         sns.heatmap(
             Corr_np, 
             annot=True, 
@@ -961,14 +973,18 @@ def plot_parameter_correlation_evolution(data_chunks, tle_base, center_freq, pas
             square=True,
             cbar_kws={"shrink": .8}
         )
-        # Update the title to include the metric
-        ax.set_title(f"{num_passes} Passes | $\|det(C)\|_F = {frob_norm_off_diag:.2f}$")
+        
+        # Use scientific notation for the determinant as it will get very small
+        ax.set_title(f"{title} ({num_passes} Passes)\n$\det(C) = {det_C:.2e}$")
         ax.set_xlabel("Modified Equinoctial Elements")
         if idx == 0:
             ax.set_ylabel("Modified Equinoctial Elements")
 
     plt.tight_layout()
     plt.show()
+
+# Execution Example:
+# plot_dof_correlation_comparison(data_chunks, tle_base, center_freq, num_passes=2)
 
 import polars as pl
 import pandas as pd
