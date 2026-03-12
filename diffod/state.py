@@ -10,7 +10,7 @@ class BaseSSV(ABC):
     Abstract Base Class for Smart-State-Vectors. 
     Handles common logic for dynamic state sizing, active maps, and bias groups.
     """
-    def __init__(self, num_measurements: int, orbital_flags: list[tuple[str, bool]]) -> None:
+    def __init__(self, num_measurements: int, orbital_flags: list[tuple[str, bool]], dtype=torch.float64) -> None:
         # self.init_tle = init_tle
         self.num_measurements = num_measurements
         
@@ -24,6 +24,7 @@ class BaseSSV(ABC):
         self.bias_groups: dict[str, BiasGroup] = {}
         self.aux_params: dict[str, float] = {}
         self.aux_param_indices: dict[str, int] = {}
+        self.dtype = dtype
 
     @abstractmethod
     def get_initial_state(self, device: torch.device = torch.device(device="cpu")) -> torch.Tensor:
@@ -124,7 +125,7 @@ class TLE_SSV(BaseSSV):
         }
 
     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-        x0 = torch.zeros(self.current_dim, dtype=torch.float32, requires_grad=True, device=device)
+        x0 = torch.zeros(self.current_dim, dtype=self.dtype, requires_grad=True, device=device)
         with torch.no_grad():
             for name, idx in self.map_param_to_idx.items():
                 _, tle_attr = self._func_arg_map[name]
@@ -163,7 +164,7 @@ class MEE_SSV(BaseSSV):
 
 
     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-        x0 = torch.zeros(self.current_dim, dtype=torch.float32, requires_grad=True, device=device)
+        x0 = torch.zeros(self.current_dim, dtype=self.dtype, requires_grad=True, device=device)
         
         with torch.no_grad():
             # 1. Cast TLE floats to tensors for the transformation block
@@ -266,7 +267,7 @@ class CalibrationSSV(BaseSSV):
         }
 
     def get_initial_state(self, device: torch.device = torch.device("cpu")) -> torch.Tensor:
-        x0 = torch.zeros(self.current_dim, dtype=torch.float64, requires_grad=True, device=device)
+        x0 = torch.zeros(self.current_dim, dtype=self.dtype, requires_grad=True, device=device)
         return x0
 
     def get_functional_args(self, x_state: torch.Tensor) -> dict[str, torch.Tensor]:

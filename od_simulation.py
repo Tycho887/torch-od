@@ -1,5 +1,8 @@
 import torch
+import numpy as np
 import polars as pl
+from collections import defaultdict
+
 import dsgp4
 from dsgp4.tle import TLE
 from astropy.time import Time
@@ -8,21 +11,17 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy
-from diffod.visualize import compute_ric_residuals, plot_ric_residuals, plot_calibrated_doppler, print_ric_residual_summary
+from diffod.visualize import compute_ric_residuals, plot_ric_residuals
 from diffod.solvers.gn_svd import svd_solve
-from diffod.solvers.gaussNewton import wgn_solve
 
 # ---------------------------------------------------------
 # 1. Configuration & Data Loading
 # ---------------------------------------------------------
 device = torch.device(device="cpu")
 dtype = torch.float64
-center_freq = 1707.0  # MHz, matching the synthetic dataset base_freq
 
-# IMPORTANT: Plug in the global mean time bias calculated from simulate.py
 known_global_time_bias_sec = 0.277
 
-# Initial TLE Guess
 TLE_list = [
     "AWS",
     "1 60543U 24149CD  25307.42878472  .00000000  00000-0  11979-3 0    11",
@@ -31,152 +30,140 @@ TLE_list = [
 tle_base = TLE(data=TLE_list)
 epoch_unix = 1762207191
 
-print("Loading Synthetic Dataset & GPS Truth...")
-
-# Load GPS Truth
+print("Loading GPS Truth...")
 t_gps, r_gps, v_gps = load_gmat_csv_block_legacy(
     file_path="data/AWS_full_long_period.csv", 
     tle_epoch_unix=epoch_unix,
-    block_sec=86400 * 2
+    block_sec=86400 * 7  # Expanded block size to ensure enough data for rolling windows
 )
 
-# Load Synthetic Doppler Telemetry
-synthetic_telemetry = pl.read_parquet("data/synthetic_period_telemetry.parquet")
-
-t_dopp = torch.tensor(synthetic_telemetry["timestamp"].to_numpy(), dtype=dtype, device=device)
-d_dopp = torch.tensor(synthetic_telemetry["Doppler_Hz"].to_numpy(), dtype=dtype, device=device)
-c_dopp = torch.tensor(synthetic_telemetry["contact_index"].to_numpy(), dtype=torch.int32, device=device)
-
-# Filter to GPS window
-valid_mask = (t_dopp >= t_gps.min()) & (t_dopp <= t_gps.max())
-t_dopp = t_dopp[valid_mask]
-d_dopp = d_dopp[valid_mask]
-c_dopp = c_dopp[valid_mask]
-
-print(f"Filtered to GPS window: {len(t_dopp)} valid samples remain.")
-print(f"Unique passes: {len(torch.unique(c_dopp))}")
-
-# Define Central Epoch for the Batch
-T_mean = float(torch.mean(t_gps))
-print(f"Central Epoch (T_mean): {T_mean}")
-
-t_ref_astropy = Time(T_mean, format="unix", scale="utc")
+# Time constants (in seconds)
+FIT_WINDOW = 2 * 3600
+FORECAST_HORIZONS = {
+    "1-hour": 3600,
+    "6-hour": 6 * 3600,
+    "24-hour": 24 * 3600
+}
+EVAL_TOLERANCE = 300  # Evaluate within a +/- 5 minute slice around the target horizon
 
 # ---------------------------------------------------------
-# PHASE 1: GPS-Based Orbit Determination (The "Truth" Benchmark)
+# 2. Core Fitting Function
 # ---------------------------------------------------------
-print("\n--- Phase 1: Fitting TLE to GPS ---")
-init_tle_gps, _ = dsgp4.newton_method(tle_base, unix_to_mjd(T_mean))
+def fit_orbit_chunk(t_fit, r_fit, v_fit, use_ml=False):
+    """Fits an orbit to a given time slice of GPS data."""
+    t_chunk_mean = float(torch.mean(t_fit))
+    
+    # Initialize state for this specific chunk's epoch
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_chunk_mean))
+    ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_fit), fit_bstar=False)
+    
+    prop = system.SGP4(ssv=ssv, use_pretrained_model=use_ml)
+    meas = system.CartesianMeasurement(ssv=ssv)
+    pipe = system.MeasurementPipeline(propagator=prop, measurement_model=meas)
 
-ssv_gps = state.MEE_SSV(init_tle=init_tle_gps, num_measurements=len(t_gps), fit_bstar=False)
-prop_gps = system.SGP4(ssv=ssv_gps)
-meas_gps = system.CartesianMeasurement(ssv=ssv_gps)
-pipe_gps = system.MeasurementPipeline(propagator=prop_gps, measurement_model=meas_gps)
+    y_obs_1d = meas.format_gps_observations(r_fit, v_fit)
+    t_since_mean = t_fit - t_chunk_mean 
 
-y_gps_1d = meas_gps.format_gps_observations(r_gps, v_gps)
-t_since_gps = (t_gps - T_mean) 
-
-x_gps_out, _ = svd_solve(
-    x_init=ssv_gps.get_initial_state(),
-    y_obs_fixed=y_gps_1d,
-    forward_fn=lambda x: pipe_gps(x=x, tsince=t_since_gps),
-    estimate_mask=ssv_gps.get_active_map(),
-    num_steps=5,
-    sigma_obs=1.0 
-)
- 
-tle_gps_fit = ssv_gps.export(x_gps_out)
-
-# ---------------------------------------------------------
-# PHASE 2: Doppler-Only Orbit Determination
-# ---------------------------------------------------------
-print("\n--- Phase 2: Doppler-Only OD ---")
-
-# Isolate high-observability parameters: Mean Motion (n) and Mean Longitude (L)
-ssv_dopp = state.MEE_SSV(
-    init_tle=tle_gps_fit, 
-    num_measurements=len(t_dopp),
-    fit_mean_motion=True, 
-    fit_f=False, fit_g=False,  # Freeze eccentricity
-    fit_h=False, fit_k=False,  # Freeze inclination and RAAN
-    fit_L=True,                # Solve for along-track phasing
-    fit_bstar=False
-)
-
-# Add ONLY the frequency bias group to the state vector
-ssv_dopp.add_linear_bias(name="pass_freq_bias", group_indices=c_dopp)
-
-station_model = system.DifferentiableStation(
-    lat_deg=78.228874, 
-    lon_deg=15.376932, 
-    alt_m=463.0, 
-    ref_unix=T_mean, 
-    ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
-    device=device
-)
-
-prop_dopp = system.SGP4(ssv=ssv_dopp)
-meas_dopp = system.DopplerMeasurement(
-    ssv=ssv_dopp, 
-    station_model=station_model,
-    freq_bias_group=ssv_dopp.get_bias_group("pass_freq_bias"),
-    time_bias_group=None # Handled manually below
-)
-
-pipe_dopp = system.MeasurementPipeline(propagator=prop_dopp, measurement_model=meas_dopp)
-
-# Apply the known global time bias directly to the observation timestamps
-t_since_dopp_calibrated = (t_dopp - T_mean) + known_global_time_bias_sec
-
-def functional_forward_calib(x) -> torch.Tensor:
-    return pipe_dopp(
-        x=x, 
-        tsince=t_since_dopp_calibrated, 
-        epoch=T_mean, 
-        center_freq=center_freq
+    x_out, _ = svd_solve(
+        x_init=ssv.get_initial_state(),
+        y_obs_fixed=y_obs_1d,
+        forward_fn=lambda x: pipe(x=x, tsince=t_since_mean),
+        estimate_mask=ssv.get_active_map(),
+        num_steps=5,
+        sigma_obs=1.0 
     )
-
-# SVD solve is generally more robust for this type of constrained state vector
-x_dopp_out, _ = svd_solve(
-    x_init=ssv_dopp.get_initial_state(),
-    y_obs_fixed=d_dopp,
-    forward_fn=functional_forward_calib,
-    sigma_obs=50.0, 
-    estimate_mask=ssv_dopp.get_active_map(),
-    num_steps=5
-)
+    return x_out, prop, t_chunk_mean
 
 # ---------------------------------------------------------
-# 3. Comparison & Visualization
+# 3. Rolling Window Evaluation
 # ---------------------------------------------------------
-print("\n--- Final Results Comparison ---")
+print("\n--- Running Rolling Window OD & Forecasting ---")
 
-print(f"GPS-Fit TLE:\n{tle_gps_fit}\n")
-tle_dopp_fit = ssv_dopp.export(x_dopp_out)
-print(f"Doppler-Fit TLE:\n{tle_dopp_fit}\n")
+t_start = float(t_gps[0])
+t_end_total = float(t_gps[-1])
+max_forecast = max(FORECAST_HORIZONS.values())
 
-results_ric = {}
+# Dictionary to store mean RIC position errors for aggregation
+error_log = {
+    "Base": defaultdict(list),
+    "ML": defaultdict(list)
+}
 
-for name, state_vec in [("GPS-Fit", x_gps_out), ("Doppler-Fit", x_dopp_out)]:
-    _, pos_err, vel_err = compute_ric_residuals(
-        x_state=state_vec, 
-        propagator=prop_gps,  
-        t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
-        tle_epoch_unix=T_mean
-    )
-    results_ric[name] = (pos_err, vel_err)
+current_t = t_start
+chunk_idx = 0
 
-print_ric_residual_summary(results_ric)
+while current_t + FIT_WINDOW + max_forecast <= t_end_total:
+    print(f"Processing Chunk {chunk_idx + 1}...")
+    try:    
+        # 1. Extract the 2-hour fit data
+        fit_mask = (t_gps >= current_t) & (t_gps < current_t + FIT_WINDOW)
+        t_fit, r_fit, v_fit = t_gps[fit_mask], r_gps[fit_mask], v_gps[fit_mask]
+        
+        if len(t_fit) < 10:
+            current_t += FIT_WINDOW
+            continue
+            
+        # 2. Fit both models
+        x_base, prop_base, t_mean_base = fit_orbit_chunk(t_fit, r_fit, v_fit, use_ml=False)
+        x_ml, prop_ml, t_mean_ml = fit_orbit_chunk(t_fit, r_fit, v_fit, use_ml=True)
+        
+        # 3. Evaluate at forecast horizons
+        fit_end_time = current_t + FIT_WINDOW
+        
+        for label, horizon_sec in FORECAST_HORIZONS.items():
+            target_t = fit_end_time + horizon_sec
+            
+            # Grab a small slice of data around the target horizon for a stable error metric
+            eval_mask = (t_gps >= target_t - EVAL_TOLERANCE) & (t_gps <= target_t + EVAL_TOLERANCE)
+            t_eval, r_eval, v_eval = t_gps[eval_mask], r_gps[eval_mask], v_gps[eval_mask]
+            
+            if len(t_eval) == 0:
+                continue
+                
+            # Base Eval
+            _, pos_err_base, _ = compute_ric_residuals(
+                x_state=x_base, propagator=prop_base, 
+                t_gps=t_eval, r_gps=r_eval, v_gps=v_eval, 
+                tle_epoch_unix=t_mean_base
+            )
+            # Store mean position error magnitude across the evaluation slice
+            err_mag_base = torch.norm(pos_err_base, dim=1).mean().item()
+            error_log["Base"][label].append(err_mag_base)
+            
+            # ML Eval
+            _, pos_err_ml, _ = compute_ric_residuals(
+                x_state=x_ml, propagator=prop_ml, 
+                t_gps=t_eval, r_gps=r_eval, v_gps=v_eval, 
+                tle_epoch_unix=t_mean_ml
+            )
+            err_mag_ml = torch.norm(pos_err_ml, dim=1).mean().item()
+            error_log["ML"][label].append(err_mag_ml)
 
-t_plot = (t_gps - T_mean) 
-plot_ric_residuals(t_plot, results_ric)
+        # Advance the rolling window (tumbling window)
+        current_t += FIT_WINDOW
+        chunk_idx += 1
+    except Exception:
+        print("Run failed")
+        current_t += FIT_WINDOW
+        chunk_idx += 1
 
-with torch.no_grad():
-    doppler_pred = functional_forward_calib(x_dopp_out)
+# [Image of RIC (Radial, In-track, Cross-track) satellite coordinate frame]
 
-plot_calibrated_doppler(
-    t_obs=t_dopp, 
-    doppler_obs=d_dopp, 
-    doppler_pred=doppler_pred, 
-    contacts=c_dopp
-)
+# ---------------------------------------------------------
+# 4. Results Aggregation
+# ---------------------------------------------------------
+print("\n--- Final Forecast Error Summary (Mean 3D RIC Position Error) ---")
+print(f"{'Horizon':<10} | {'Base dSGP4 (m)':<15} | {'ML-dSGP4 (m)':<15}")
+print("-" * 65)
+
+for label in FORECAST_HORIZONS.keys():
+    base_errors = error_log["Base"][label]
+    ml_errors = error_log["ML"][label]
+    
+    if not base_errors:
+        continue
+        
+    mean_base = np.mean(base_errors)
+    mean_ml = np.mean(ml_errors)
+    
+    print(f"{label:<10} | {mean_base:<15.2f} | {mean_ml:<15.2f}")

@@ -88,15 +88,15 @@ class DopplerMeasurement(nn.Module):
         total_time_offset = args.get("time_offset", 0.0)
 
         # Extract per-pass time biases
-        if self.time_bias_group is not None:
-            mask = self.time_bias_group.indices >= 0
-            valid_indices = self.time_bias_group.indices[mask]
-            start = self.time_bias_group.global_offset
-            end = start + self.time_bias_group.num_params
+        # if self.time_bias_group is not None:
+            # mask = self.time_bias_group.indices >= 0
+            # valid_indices = self.time_bias_group.indices[mask]
+            # start = self.time_bias_group.global_offset
+            # end = start + self.time_bias_group.num_params
             
-            pass_offsets = torch.zeros_like(tsince)
-            pass_offsets[mask] = x[start:end][valid_indices]
-            total_time_offset = total_time_offset + pass_offsets
+            # pass_offsets = torch.zeros_like(tsince)
+            # pass_offsets[mask] = x[start:end][valid_indices]
+            # total_time_offset = total_time_offset + pass_offsets
 
         # 1. Apply the offset to the SMALL relative time (Preserves deep precision)
         t_eval_since = tsince + total_time_offset
@@ -110,10 +110,10 @@ class DopplerMeasurement(nn.Module):
 
         raw_doppler = compute_doppler(sat_pos, sat_vel, st_pos, st_vel, f_c)
 
-        if self.freq_bias_group is not None:
-            return apply_linear_bias(predictions=raw_doppler, x_state=x, bias_group=self.freq_bias_group)
+        # if self.freq_bias_group is not None:
+        return apply_linear_bias(predictions=raw_doppler, x_state=x, bias_group=self.freq_bias_group)
 
-        return raw_doppler
+        # return raw_doppler
 
 class CartesianMeasurement(nn.Module):
     """
@@ -161,12 +161,13 @@ class CartesianMeasurement(nn.Module):
     
 
 class GPSInterpolator(nn.Module):
-    def __init__(self, ssv, t_gps_ref, r_gps_ref, v_gps_ref, time_bias_group=None):
+    def __init__(self, ssv, t_gps_ref, r_gps_ref, v_gps_ref, time_bias_group=None, dtype: torch.dtype = torch.float64):
         super().__init__()
         self.ssv = ssv
-        self.t_ref = t_gps_ref.to(torch.float64)
-        self.r_ref = r_gps_ref.to(torch.float64)
-        self.v_ref = v_gps_ref.to(torch.float64)
+        self.dtype=dtype
+        self.t_ref = t_gps_ref.to(self.dtype)
+        self.r_ref = r_gps_ref.to(self.dtype)
+        self.v_ref = v_gps_ref.to(self.dtype)
         self.time_bias_group = time_bias_group
 
     def forward(self, x: torch.Tensor, tsince: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -231,13 +232,14 @@ class DifferentiableStation(nn.Module):
         alt_m: float, 
         ref_unix: float, 
         ref_gmst_rad: float,
-        device: torch.device = torch.device(device="cpu")
+        device: torch.device = torch.device(device="cpu"),
+        dtype: torch.dtype = torch.float64
     ) -> None:
         super().__init__()
         self.omega_earth = 7.292115146706979e-5  # rad/s (Nominal WGS84 rotation)
-        
-        self.ref_unix = torch.tensor(ref_unix, dtype=torch.float64, device=device)
-        self.ref_gmst_rad = torch.tensor(ref_gmst_rad, dtype=torch.float64, device=device)
+        self.dtype = dtype
+        self.ref_unix = torch.tensor(ref_unix, dtype=self.dtype, device=device)
+        self.ref_gmst_rad = torch.tensor(ref_gmst_rad, dtype=self.dtype, device=device)
         
         # WGS84 Geodetic to ECEF (Computed once)
         lat = math.radians(lat_deg)
@@ -252,7 +254,7 @@ class DifferentiableStation(nn.Module):
         y = (N + alt_km) * math.cos(lat) * math.sin(lon)
         z = (N * (1 - e2) + alt_km) * math.sin(lat)
         
-        self.r_ecef = torch.tensor([x, y, z], dtype=torch.float64, device=device)
+        self.r_ecef = torch.tensor([x, y, z], dtype=self.dtype, device=device)
         
     def forward(self, t_unix_shifted: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # 1. Earth Rotation Angle

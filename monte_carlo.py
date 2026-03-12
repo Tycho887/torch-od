@@ -10,7 +10,20 @@ from astropy.time import Time
 import diffod.state as state
 import diffod.functional.system as system
 from diffod.utils import unix_to_mjd, load_gmat_csv_block_legacy, parameter_covariance_propagation, extract_cca_priors
-from diffod.visualize import compute_ric_residuals, plot_pca_information_space, plot_dof_correlation_comparison, plot_dof_forecast_trends, plot_ric_error_propagation
+from diffod.visualize import (compute_ric_residuals, 
+                              plot_total_parameter_variance, 
+                              plot_cross_validation, 
+                              analyze_hessian_topology, 
+                              plot_dof_forecast_trends, 
+                            #   plot_pca_information_space, 
+                              plot_passes_mi_comparison, 
+                              plot_passes_correlation_comparison, 
+                              plot_exact_hessian_alignment,
+                              generate_rmse_statistics_table,
+                              plot_objective_sensitivity_alignment,
+                              plot_pas_and_correlation,
+                              plot_single_orbit_ric_residuals,
+                            plot_observability_state_alignment)
 from diffod.solvers.gn_svd import svd_solve
 from diffod.solvers.cca import cca_solve
 
@@ -157,7 +170,7 @@ def evaluate_forecast_metrics(
         # Calculate full 3D RMSE
         metrics[label] = torch.sqrt(torch.mean(torch.sum(pos_ric**2, dim=1))).item()
         
-        print("Shape is:",torch.sum(pos_ric**2, dim=1).shape)
+        # print("Shape is:",torch.sum(pos_ric**2, dim=1).shape)
 
         # Decompose into Radial (0), In-track (1), and Cross-track (2) RMSE
         rms_ric = torch.sqrt(torch.mean(pos_ric**2, dim=0))
@@ -219,155 +232,164 @@ print("\n--- Phase 2: Multi-Dimensional Epoch-Centered Simulation ---")
 dof_configs = {
     "1-DOF (L)": {"fit_mean_motion": False, "fit_L": True, "fit_f": False, "fit_g": False, "fit_h": False, "fit_k": False},
     "2-DOF (n, L)": {"fit_mean_motion": True, "fit_L": True, "fit_f": False, "fit_g": False, "fit_h": False, "fit_k": False},
-    # "2-DOF (n, f)": {"fit_mean_motion": True, "fit_L": False, "fit_f": True, "fit_g": False, "fit_h": False, "fit_k": False},
-    # "2-DOF (n, g)": {"fit_mean_motion": True, "fit_L": False, "fit_f": False, "fit_g": True, "fit_h": False, "fit_k": False},    
-    # "3-DOF (n, L, f)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": False, "fit_h": False, "fit_k": False},
-    "3-DOF (n, L, g)": {"fit_mean_motion": True, "fit_L": True, "fit_f": False, "fit_g": True, "fit_h": False, "fit_k": False},
-    "4-DOF (n, L, f, g)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": True, "fit_h": False, "fit_k": False},
-    # "4-DOF (n, L, k, g)": {"fit_mean_motion": True, "fit_L": True, "fit_f": False, "fit_g": True, "fit_h": False, "fit_k": True},
-    # "6-DOF (Full State)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": True, "fit_h": True, "fit_k": True}
+    "2-DOF (n, k)": {"fit_mean_motion": True, "fit_L": True, "fit_f": False, "fit_g": False, "fit_h": True, "fit_k": False},
+    "3-DOF (n, L, k)": {"fit_mean_motion": True, "fit_L": True, "fit_f": False, "fit_g": False, "fit_h": False, "fit_k": True},
+    "4-DOF (n, L, k, h)": {"fit_mean_motion": True, "fit_L": True, "fit_f": True, "fit_g": True, "fit_h": True, "fit_k": True},
 }
 
-data_chunks = create_pass_chunks(t_dopp, d_dopp_true, c_dopp, passes_per_chunk=8, num_chunks=3)
+data_chunks = create_pass_chunks(t_dopp, d_dopp_true, c_dopp, passes_per_chunk=6, num_chunks=4)
 passes_to_test = [0,1,2,3,4,5,6,7,8]  # Added 0 to the test list
 experiment_results = []
 segment_ric_trajectories = {}
 # Initialize a dictionary to hold the lists of trajectories for the 6-pass analysis
-# six_pass_trajectories = {
-#     "2-DOF (n, L)": [],
-#     "3-DOF (n, L, g)": [] # Add whichever configs you are currently testing
-# }
+six_pass_trajectories = {
+    "2-DOF (n, L)": [],
+    "3-DOF (n, L, g)": [] # Add whichever configs you are currently testing
+}
 
-# target_trajectory = None
+target_trajectory = None
 
-# for chunk in data_chunks:
-#     print(f"\nProcessing Dataset Chunk {chunk['chunk_id']}...")
+for chunk in data_chunks:
+    print(f"\nProcessing Dataset Chunk {chunk['chunk_id']}...")
     
-#     for num_passes in passes_to_test:
+    for num_passes in passes_to_test:
         
-#         # ==========================================
-#         # BASELINE (0-PASS) LOGIC
-#         # ==========================================
-#         if num_passes == 0:
-#             # Use the first pass to establish a baseline epoch and end-time
-#             active_pass_ids = chunk["pass_ids"][:1]
-#             pass_mask = torch.isin(chunk["c"], active_pass_ids)
-#             t_active = chunk["t"][pass_mask]
+        # ==========================================
+        # BASELINE (0-PASS) LOGIC
+        # ==========================================
+        if num_passes == 0:
+            # Use the first pass to establish a baseline epoch and end-time
+            active_pass_ids = chunk["pass_ids"][:1]
+            pass_mask = torch.isin(chunk["c"], active_pass_ids)
+            t_active = chunk["t"][pass_mask]
             
-#             t_mean_window = float(torch.mean(t_active))
-#             t_end_window = float(t_active[-1])
+            t_mean_window = float(torch.mean(t_active))
+            t_end_window = float(t_active[-1])
             
-#             # Center the global GPS TLE to this specific window
-#             tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+            # Center the global GPS TLE to this specific window
+            tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
             
-#             # Setup a baseline SSV and propagator (no measurement tracking needed)
-#             baseline_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=1, fit_mean_motion=False)
-#             prop_baseline = system.SGP4(ssv=baseline_ssv, use_pretrained_model=True)
+            # Setup a baseline SSV and propagator (no measurement tracking needed)
+            baseline_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=1, fit_mean_motion=False)
+            prop_baseline = system.SGP4(ssv=baseline_ssv, use_pretrained_model=True)
             
-#             # Evaluate the prior state
-#             metrics, times, pos_ric, vel_ric = evaluate_forecast_metrics(
-#                 x_state=baseline_ssv.get_initial_state(), 
-#                 propagator=prop_baseline,
-#                 t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
-#                 epoch_unix=t_mean_window, t_end_obs=t_end_window
-#             )
+            # Evaluate the prior state
+            metrics, times, pos_ric, vel_ric = evaluate_forecast_metrics(
+                x_state=baseline_ssv.get_initial_state(), 
+                propagator=prop_baseline,
+                t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+                epoch_unix=t_mean_window, t_end_obs=t_end_window
+            )
 
-#             segment_ric_trajectories[chunk["chunk_id"]] = (times, pos_ric, vel_ric)
+            segment_ric_trajectories[chunk["chunk_id"]] = (times, pos_ric, vel_ric)
             
-#             experiment_results.append({
-#                 "chunk_id": chunk["chunk_id"],
-#                 "num_passes": 0,
-#                 "mc_iteration": 0, # Added for schema consistency
-#                 "1h_rmse": metrics.get('1h', np.nan),
-#                 "6h_rmse": metrics.get('6h', np.nan),
-#                 "24h_rmse": metrics.get('24h', np.nan),
-#                 "24h_R": np.nanmean(metrics.get('24h_R', [np.nan])),
-#                 "24h_I": np.nanmean(metrics.get('24h_I', [np.nan])),
-#                 "24h_C": np.nanmean(metrics.get('24h_C', [np.nan])),
-#                 "cov_frob": np.nan 
-#             })
+            experiment_results.append({
+                "chunk_id": chunk["chunk_id"],
+                "num_passes": 0,
+                "mc_iteration": 0, # Added for schema consistency
+                "1h_rmse": metrics.get('1h', np.nan),
+                "6h_rmse": metrics.get('6h', np.nan),
+                "24h_rmse": metrics.get('24h', np.nan),
+                "24h_R": np.nanmean(metrics.get('24h_R', [np.nan])),
+                "24h_I": np.nanmean(metrics.get('24h_I', [np.nan])),
+                "24h_C": np.nanmean(metrics.get('24h_C', [np.nan])),
+                "cov_frob": np.nan 
+            })
             
-#             print(f"  -> Passes: 0 | Baseline | 1h RMSE: {metrics.get('1h', np.nan):.2f} km | 24h RMSE: {metrics.get('24h', np.nan):.2f} km (Baseline)")
-#             continue
+            print(f"  -> Passes: 0 | Baseline | 1h RMSE: {metrics.get('1h', np.nan):.2f} km | 24h RMSE: {metrics.get('24h', np.nan):.2f} km (Baseline)")
+            continue
 
-#         # ==========================================
-#         # OD (>0 PASS) LOGIC
-#         # ==========================================
-#         active_pass_ids = chunk["pass_ids"][:num_passes]
-#         pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        # ==========================================
+        # OD (>0 PASS) LOGIC
+        # ==========================================
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
         
-#         t_active = chunk["t"][pass_mask]
-#         d_active_true = chunk["d_true"][pass_mask]
-#         c_active = chunk["c"][pass_mask]
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
         
-#         # 1. Shift the reference epoch
-#         t_mean_window = float(torch.mean(t_active))
-#         t_end_window = float(t_active[-1])
-#         tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        # 1. Shift the reference epoch
+        t_mean_window = float(torch.mean(t_active))
+        t_end_window = float(t_active[-1])
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
 
-#         # Iterate through the DOF configurations
-#         for config_name, config_params in dof_configs.items():
+        # Iterate through the DOF configurations
+        for config_name, config_params in dof_configs.items():
             
-#             # Setup the dummy SSV for this specific configuration to get the correct active map
-#             dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), **config_params)
-#             dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
-#             standard_x_guess = dummy_ssv.get_initial_state()
+            # Setup the dummy SSV for this specific configuration to get the correct active map
+            dummy_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active), **config_params)
+            dummy_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+            standard_x_guess = dummy_ssv.get_initial_state()
             
-#             for i in range(MC_ITERATIONS):
-#                 noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
-#                 x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
-#                 d_active_noisy = d_active_true + torch.randn_like(d_active_true) * DOPPLER_NOISE_STD_HZ
-                
-#                 # Pass the configuration into the OD function
-#                 x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
-#                     x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
-#                     ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC,
-#                     dof_config=config_params  # <-- NEW
-#                 )
+            for i in range(MC_ITERATIONS):
+                try:
+                    noise_vector = torch.randn_like(standard_x_guess) * STATE_NOISE_SCALE
+                    x_noisy_guess = standard_x_guess + (standard_x_guess * noise_vector)
+                    d_active_noisy = d_active_true + torch.randn_like(d_active_true) * DOPPLER_NOISE_STD_HZ
+                    
+                    # Pass the configuration into the OD function
+                    x_mc_out, cov_mc, _, prop_mc = run_doppler_od(
+                        x_guess=x_noisy_guess, t_obs=t_active, d_obs=d_active_noisy, c_obs=c_active,
+                        ref_unix=t_mean_window, base_tle=tle_window, time_bias_sec=KNOWN_GLOBAL_TIME_BIAS_SEC,
+                        dof_config=config_params  # <-- NEW
+                    )
 
-#                 metrics, times, pos_ric, vel_ric = evaluate_forecast_metrics(
-#                     x_state=x_mc_out, propagator=prop_mc,
-#                     t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
-#                     epoch_unix=t_mean_window, t_end_obs=t_end_window
-#                 )
+                    metrics, times, pos_ric, vel_ric = evaluate_forecast_metrics(
+                        x_state=x_mc_out, propagator=prop_mc,
+                        t_gps=t_gps, r_gps=r_gps, v_gps=v_gps, 
+                        epoch_unix=t_mean_window, t_end_obs=t_end_window
+                    )
 
-#                 # Capture trajectory strictly for the 6-pass runs to plot the envelope
-#                 if num_passes == 6 and config_name == "2-DOF (n, L)" and target_trajectory is None:
-#                     target_trajectory = (times, pos_ric, vel_ric)
+                    # Capture trajectory strictly for the 6-pass runs to plot the envelope
+                    if num_passes == 6 and config_name == "2-DOF (n, L)" and target_trajectory is None:
+                        target_trajectory = (times, pos_ric, vel_ric)
 
-#                 # segment_ric_trajectories[chunk["chunk_id"]] = (times, pos_ric, vel_ric)
-                
-#                 experiment_results.append({
-#                     "chunk_id": chunk["chunk_id"],
-#                     "num_passes": num_passes,
-#                     "mc_iteration": i,
-#                     "dof_config": config_name,  # <-- NEW
-#                     "1h_rmse": metrics.get('1h', np.nan),
-#                     "6h_rmse": metrics.get('6h', np.nan),
-#                     "24h_rmse": metrics.get('24h', np.nan),
-#                     # "cov": cov_mc.item() if cov_mc is not None else np.nan,
-#                     "cov_frob": torch.sum(torch.diag(cov_mc)[:2]).item() if cov_mc is not None else np.nan
-#                 })
-#                 print(f"  -> Passes: {num_passes} | {config_name} | 1h RMSE: {np.nanmean(metrics['1h']):.2f} km | 24h RMSE: {np.nanmean(metrics['24h']):.2f} km")
+                    # segment_ric_trajectories[chunk["chunk_id"]] = (times, pos_ric, vel_ric)
+                    
+                    experiment_results.append({
+                        "chunk_id": chunk["chunk_id"],
+                        "num_passes": num_passes,
+                        "mc_iteration": i,
+                        "dof_config": config_name,  # <-- NEW
+                        "1h_rmse": metrics.get('1h', np.nan),
+                        "6h_rmse": metrics.get('6h', np.nan),
+                        "24h_rmse": metrics.get('24h', np.nan),
+                        # "cov": cov_mc.item() if cov_mc is not None else np.nan,
+                        "cov_frob": torch.sum(torch.diag(cov_mc)[:2]).item() if cov_mc is not None else np.nan
+                    })
+                    print(f"  -> Passes: {num_passes} | {config_name} | 1h RMSE: {np.nanmean(metrics['1h']):.2f} km | 24h RMSE: {np.nanmean(metrics['24h']):.2f} km")
+                except Exception:
+                    continue
 
 
-
-# Execute plotting
+# # Execute plotting
 # plot_cross_validation(experiment_results)
-# plot_ric_error_propagation(segment_ric_trajectories)
-# plot_dof_forecast_trends(experiment_results)
+# # plot_ric_error_propagation(segment_ric_trajectories)
+plot_dof_forecast_trends(experiment_results)
 
 # # Execute Plotting
-# if target_trajectory is not None:
-#     t_mins, pos_ric, vel_ric = target_trajectory
-#     plot_single_orbit_ric_residuals(t_mins, pos_ric, vel_ric)# plot_segment_ric_residuals(segment_ric_trajectories)
+if target_trajectory is not None:
+    t_mins, pos_ric, vel_ric = target_trajectory
+    plot_single_orbit_ric_residuals(t_mins, pos_ric, vel_ric)# plot_segment_ric_residuals(segment_ric_trajectories)
 # plot_median_forecast_trends(experiment_results)
-plot_dof_correlation_comparison(data_chunks, tle_base, center_freq, num_passes=4)
-# plot_pca_information_space(experiment_results))
+plot_passes_correlation_comparison(data_chunks, tle_base, center_freq)
+plot_passes_mi_comparison(data_chunks, tle_base, center_freq)
+# plot_pca_information_space(experiment_results)
 
 # plot_observability_growth(data_chunks, T_mean, tle_base, center_freq)
-plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=4)
+# plot_total_parameter_variance(data_chunks, tle_base, center_freq, num_passes=3)
 
-# summary_table = generate_rmse_statistics_table(results=experiment_results, horizons=["1h", "24h"])
-# summary_table.to_csv("simulation_data")
-# print(summary_table)
+summary_table = generate_rmse_statistics_table(results=experiment_results, horizons=["1h", "24h"])
+summary_table.to_csv("simulation_data")
+print(summary_table)
+# plot_ric_state_variance_attribution(t_gps, r_gps, v_gps, tle_base, epoch_unix)
+# plot_estimator_utility_space(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+# plot_full_observability_state_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=2)
+# plot_decoupled_state_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=2)
+# plot_pas_and_correlation(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=4)
+# plot_residual_explainability_r2(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+# plot_exact_hessian_alignment(data_chunks, t_gps, r_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+plot_objective_sensitivity_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=6)
+# analyze_hessian_topology(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+# plot_hessian_eigenspace_stability(data_chunks, tle_base, center_freq, epoch_unix, num_passes=3)

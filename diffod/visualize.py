@@ -1,4 +1,5 @@
 from astropy import conf
+from astropy.units import hh
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -231,9 +232,230 @@ def plot_calibrated_doppler(
     plt.tight_layout()
     plt.show()
 
-# import torch
-# import numpy as np
+def plot_passes_correlation_comparison(data_chunks, tle_base, center_freq):
+    """
+    Plots the parameter correlation matrix for the full 7-DOF model
+    across different amounts of data (1, 3, and 6 passes).
+    """
+    # 1. Define the pass counts to compare and lock in the 7-DOF configuration
+    pass_counts = [1, 3, 6]
+    param_names = ["n", "L", "f", "g", "k", "h", "B*"]
+    col_indices = [0, 5, 1, 2, 4, 3, 6]
+    
+    chunk = data_chunks[0]
+    
+    # Setup the figure for multiple subplots
+    fig, axes = plt.subplots(1, len(pass_counts), figsize=(6 * len(pass_counts), 5.5))
+    
+    # 2. Loop through the different pass configurations
+    for idx, num_passes in enumerate(pass_counts):
+        
+        # Setup the data for the specific number of passes
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
+        
+        t_mean_window = float(torch.mean(t_active))
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        
+        # 3. Base Evaluation Setup (must be recreated per pass count since t_active changes)
+        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        x_eval = eval_ssv.get_initial_state()
+        
+        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+        station_model = system.DifferentiableStation(
+            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+            ref_unix=t_mean_window, 
+            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian
+        )
+        
+        prop_eval = system.SGP4(ssv=eval_ssv, use_pretrained_model=True)
+        meas_eval = system.DopplerMeasurement(
+            ssv=eval_ssv, station_model=station_model,
+            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+        )
+        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+        t_since = (t_active - t_mean_window) + 0.277
+        
+        # 4. Compute Full Jacobian for this specific chunk of data
+        def res_fn(x):
+            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq) - d_active_true
+            
+        H_total = jacfwd(res_fn)(x_eval)
+        
+        # Isolate only the specified 7 parameters
+        H_orb = H_total[:, col_indices]
+        
+        # --- Scale the Jacobian for numerical stability ---
+        col_scales = torch.max(torch.abs(H_orb), dim=0)[0]
+        col_scales[col_scales == 0] = 1.0  
+        H_scaled = H_orb / col_scales
+        
+        # Compute FIM with the scaled Jacobian
+        sigma_obs = 20.0
+        W = 1.0 / (sigma_obs**2)
+        FIM_scaled = H_scaled.T @ (H_scaled * W)
+        
+        # Use pseudo-inverse on the well-conditioned matrix
+        Cov_scaled = torch.linalg.pinv(FIM_scaled)
+        
+        # Compute standard deviations
+        std_dev = torch.sqrt(torch.abs(torch.diag(Cov_scaled)))
+        outer_std = torch.outer(std_dev, std_dev)
+
+        # FIM_numpy = FIM_scaled.detach().cpu().numpy()
+        Corr_np = np.linalg.inv(Cov_scaled.detach().cpu().numpy())
+        
+        # Compute Correlation
+        Corr = Cov_scaled / (outer_std + 1e-12)
+        Corr.fill_diagonal_(1.0) # Force exact 1.0 on diagonals
+        
+        Corr_np = Corr.detach().cpu().numpy()
+        
+        # Calculate the Determinant (Generalized Variance)
+        det_C = np.linalg.det(Corr_np)
+        
+        # 5. Plotting
+        ax = axes[idx] if len(pass_counts) > 1 else axes
+        sns.heatmap(
+            Corr_np, 
+            annot=True, 
+            cmap="coolwarm", 
+            vmin=-1, vmax=1, 
+            xticklabels=param_names,
+            yticklabels=param_names,
+            fmt=".2f",
+            ax=ax,
+            square=True,
+            cbar_kws={"shrink": .8}
+        )
+        
+        ax.set_title(f"7-DOF ({num_passes} Passes)\n$\\det(C) = {det_C:.2e}$")
+        ax.set_xlabel("Modified Equinoctial Elements")
+        if idx == 0:
+            ax.set_ylabel("Modified Equinoctial Elements")
+
+    plt.tight_layout()
+    plt.show()
+
+import numpy as np
+import torch
 # import matplotlib.pyplot as plt
+# import seaborn as sns
+# from astropy.time import Time
+# from torch.autograd.functional import jacfwd
+
+# (Assuming state, system, dsgp4, and unix_to_mjd are imported)
+
+def plot_passes_mi_comparison(data_chunks, tle_base, center_freq):
+    """
+    Plots the Mutual Information matrix for the full 7-DOF model
+    across different amounts of data (1, 3, and 6 passes).
+    """
+    # 1. Define the pass counts and configurations
+    pass_counts = [1, 3, 6]
+    param_names = ["n", "L", "f", "g", "k", "h", "B*"]
+    col_indices = [0, 5, 1, 2, 4, 3, 6]
+    
+    chunk = data_chunks[0]
+    
+    fig, axes = plt.subplots(1, len(pass_counts), figsize=(6 * len(pass_counts), 5.5))
+    
+    # 2. Loop through the different pass configurations
+    for idx, num_passes in enumerate(pass_counts):
+        
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
+        
+        t_mean_window = float(torch.mean(t_active))
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        
+        # 3. Base Evaluation Setup
+        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        x_eval = eval_ssv.get_initial_state()
+        
+        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+        station_model = system.DifferentiableStation(
+            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+            ref_unix=t_mean_window, 
+            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian
+        )
+        
+        prop_eval = system.SGP4(ssv=eval_ssv, use_pretrained_model=True)
+        meas_eval = system.DopplerMeasurement(
+            ssv=eval_ssv, station_model=station_model,
+            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+        )
+        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+        t_since = (t_active - t_mean_window) + 0.277
+        
+        # 4. Compute Full Jacobian and scale it
+        def res_fn(x):
+            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq) - d_active_true
+            
+        H_total = jacfwd(res_fn)(x_eval)
+        H_orb = H_total[:, col_indices]
+        
+        col_scales = torch.max(torch.abs(H_orb), dim=0)[0]
+        col_scales[col_scales == 0] = 1.0  
+        H_scaled = H_orb / col_scales
+        
+        # Compute FIM and Covariance
+        sigma_obs = 20.0
+        W = 1.0 / (sigma_obs**2)
+        FIM_scaled = H_scaled.T @ (H_scaled * W)
+        Cov_scaled = torch.linalg.pinv(FIM_scaled)
+        
+        # Compute Correlation
+        std_dev = torch.sqrt(torch.abs(torch.diag(Cov_scaled)))
+        outer_std = torch.outer(std_dev, std_dev)
+        Corr = Cov_scaled / (outer_std + 1e-12)
+        Corr.fill_diagonal_(1.0) 
+        
+        Corr_np = Corr.detach().cpu().numpy()
+        
+        # --- NEW: Compute Mutual Information ---
+        # Clip squared correlation slightly below 1 to prevent log(0) errors on off-diagonals
+        rho_sq = np.clip(Corr_np**2, 0, 0.99999) 
+        MI_np = -0.5 * np.log(1 - rho_sq)
+        
+        # Set diagonal to NaN so 'infinity' doesn't ruin the heatmap color mapping
+        np.fill_diagonal(MI_np, np.nan)
+        
+        det_FIM = np.linalg.det(FIM_scaled.detach().cpu().numpy())
+        
+        # 5. Plotting
+        ax = axes[idx] if len(pass_counts) > 1 else axes
+        sns.heatmap(
+            MI_np, 
+            annot=True, 
+            cmap="Reds",    # Changed to a sequential colormap
+            vmin=0,         # MI is strictly >= 0
+            vmax=5,         # Cap the colorbar at 5 nats to highlight differences
+            xticklabels=param_names,
+            yticklabels=param_names,
+            fmt=".2f",
+            ax=ax,
+            square=True,
+            cbar_kws={"shrink": .8, "label": "Mutual Info (nats)"}
+        )
+        
+        ax.set_title(f"Mutual Info ({num_passes} Passes)\n$\\det(FIM) = {det_FIM:.2e}$")
+        ax.set_xlabel("Modified Equinoctial Elements")
+        if idx == 0:
+            ax.set_ylabel("Modified Equinoctial Elements")
+
+    plt.tight_layout()
+    plt.show()
 
 def plot_residual_diagnostics(residuals: torch.Tensor, lags: int = 50, num_bins: int = 30):
     """
@@ -637,6 +859,7 @@ def plot_dof_forecast_trends(results: list[dict]):
             ax=ax, marker='o', estimator='median', errorbar=('pi', 50), # 50th percentile band
             linewidth=2
         )
+        ax.legend(title="DOF Configuration")
         ax.set_title(title)
         ax.set_xlabel("Number of Passes")
         ax.set_ylabel("Median RMSE (km)")
@@ -646,6 +869,7 @@ def plot_dof_forecast_trends(results: list[dict]):
         ax.set_yscale('log') 
         
     plt.tight_layout()
+    plt.savefig("forecast_trends.png", dpi=500)
     plt.show()
 
 def plot_observability_growth(data_chunks, T_mean, tle_base, center_freq):
@@ -776,15 +1000,125 @@ def plot_ric_error_propagation(
     plt.tight_layout()
     plt.show()
 
-def plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=3):
+# import numpy as np
+# import torch
+# import matplotlib.subplots as plt
+# import seaborn as sns
+# from astropy.time import Time
+# from torch.func import jacfwd
+# import dsgp4
+
+def plot_doppler_variance_pca(data_chunks, tle_base, center_freq, passes_to_plot=[1, 3, 6]):
     """
-    Performs a PCA-equivalent eigendecomposition on the normalized Fisher 
-    Information Matrix to show the dominance of specific MEE parameters.
+    Performs a PCA on the Doppler measurement Jacobian to show
+    the absolute signal variance (in Hz^2) explained by the MEE parameters.
     """
-    param_names = ["n", "L", "g", "f"]
+    param_names = ["n", "f", "L", "g"]
     chunk = data_chunks[0]
     
-    # 1. Setup the 3-pass data
+    fig, axes = plt.subplots(2, len(passes_to_plot), figsize=(6 * len(passes_to_plot), 10))
+    
+    for idx, num_passes in enumerate(passes_to_plot):
+        active_pass_ids = chunk["pass_ids"][:num_passes]
+        pass_mask = torch.isin(chunk["c"], active_pass_ids)
+        
+        t_active = chunk["t"][pass_mask]
+        d_active_true = chunk["d_true"][pass_mask]
+        c_active = chunk["c"][pass_mask]
+        
+        t_mean_window = float(torch.mean(t_active))
+        tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+        
+        eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+        eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+        x_eval = eval_ssv.get_initial_state()
+        
+        t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+        station_model = system.DifferentiableStation(
+            lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+            ref_unix=t_mean_window, 
+            ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+        )
+        
+        prop_eval = system.SGP4(ssv=eval_ssv)
+        meas_eval = system.DopplerMeasurement(
+            ssv=eval_ssv, station_model=station_model,
+            freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+        )
+        pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+        t_since = (t_active - t_mean_window) + 0.277
+        
+        # Compute Full Jacobian
+        def res_fn(x):
+            return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
+            
+        H_total = jacfwd(res_fn)(x_eval)
+        H_orb = H_total[:, :len(param_names)]
+        
+        # Scale by a standard prior variance to ensure units are physically balanced
+        # (e.g., simulating a baseline 1e-4 physical perturbation to the state)
+        state_perturbation_variance = (1e-4)**2
+        
+        # Compute the Absolute Signal Variance Matrix (in Hz^2)
+        Signal_Variance_Matrix = (H_orb.T @ H_orb) * state_perturbation_variance
+        
+        evals, evecs = torch.linalg.eigh(Signal_Variance_Matrix)
+        
+        # Sort in descending order
+        evals = evals.detach().cpu().numpy()
+        evecs = evecs.detach().cpu().numpy()
+        sort_idx = np.argsort(evals)[::-1]
+        evals = evals[sort_idx]
+        evecs = evecs[:, sort_idx]
+        
+        # Calculate the PC composition
+        pc_composition = evecs**2
+        
+        # Plot A: Absolute Variance (Scree Plot)
+        ax_bar = axes[0, idx]
+        ax_bar.bar(range(1, len(evals)+1), evals, alpha=0.8, color='steelblue')
+        ax_bar.set_yscale('log')
+        ax_bar.set_title(f"Doppler Signal Variance ({num_passes} Passes)\nTotal Var: {np.sum(evals):.2e} $Hz^2$")
+        ax_bar.set_xlabel("Principal Component (PC)")
+        ax_bar.set_ylabel("Absolute Explained Variance ($Hz^2$)")
+        ax_bar.set_xticks(range(1, len(evals)+1))
+        ax_bar.grid(True, linestyle='--', alpha=0.6)
+        
+        # Plot B: Heatmap of PC Composition
+        ax_heat = axes[1, idx]
+        sns.heatmap(
+            pc_composition.T, 
+            annot=True, 
+            cmap="YlGnBu", 
+            xticklabels=param_names,
+            yticklabels=[f"PC {i+1}" for i in range(len(evals))],
+            ax=ax_heat,
+            fmt=".2f",
+            cbar_kws={"shrink": .8}
+        )
+        ax_heat.set_title("Parameter Composition of PCs")
+        ax_heat.set_xlabel("Modified Equinoctial Elements")
+
+    plt.tight_layout()
+    plt.show()
+
+# import numpy as np
+# import torch
+# import matplotlib.pyplot as plt
+# import seaborn as sns
+# from astropy.time import Time
+from torch.func import jacfwd
+# import dsgp4
+
+def plot_total_parameter_variance(data_chunks, tle_base, center_freq, num_passes=3):
+    """
+    Computes the Total Parameter Importance by weighting the SVD parameter 
+    composition by the variance explained by each principal component.
+    """
+    param_names = ["n", "L"]#, "L", "g", "f", "h", "k"]
+    chunk = data_chunks[0]
+    
+    # 1. Setup Data
     active_pass_ids = chunk["pass_ids"][:num_passes]
     pass_mask = torch.isin(chunk["c"], active_pass_ids)
     
@@ -795,19 +1129,18 @@ def plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=3)
     t_mean_window = float(torch.mean(t_active))
     tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
     
-    # 2. Initialize SSV and Forward Model
+    # 2. Setup Forward Model
     eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
     eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
     x_eval = eval_ssv.get_initial_state()
     
+    # ... [Initialize station_model, prop_eval, meas_eval, pipe_eval as before] ...
     t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
     station_model = system.DifferentiableStation(
         lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
         ref_unix=t_mean_window, 
         ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
-        # device=device
     )
-    
     prop_eval = system.SGP4(ssv=eval_ssv)
     meas_eval = system.DopplerMeasurement(
         ssv=eval_ssv, station_model=station_model,
@@ -815,176 +1148,75 @@ def plot_pca_information_space(data_chunks, tle_base, center_freq, num_passes=3)
     )
     pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
     t_since = (t_active - t_mean_window) + 0.277
+    
+    # 3. Compute Initial Residuals and Jacobian
+    with torch.no_grad():
+        d_pred_initial = pipe_eval(x=x_eval, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
+        
+    residuals = d_active_true - d_pred_initial
     
     def forward_fn(x):
         return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq)
         
-    # 3. Compute Observability (Eigendecomposition of Normalized FIM)
-    _, evals, evecs = compute_observability_metrics(
-        x_state=x_eval, forward_fn=forward_fn, 
-        d_obs_fixed=d_active_true, sigma_obs=20.0, param_names=param_names
-    )
+    H_total = jacfwd(forward_fn)(x_eval)
+    H_orb = H_total[:, :len(param_names)] 
     
-    # Sort eigenvalues/eigenvectors in descending order (Largest Information -> Smallest)
-    idx = np.argsort(evals)[::-1]
-    evals = evals[idx]
-    evecs = evecs[:, idx]
+    # 4. Normalize the Jacobian
+    col_norms = torch.norm(H_orb, dim=0)
+    H_norm = H_orb / (col_norms + 1e-16)
     
-    # Calculate Explained Information Ratio (PCA equivalent)
-    explained_info_ratio = evals / np.sum(evals)
-    cumulative_info = np.cumsum(explained_info_ratio)
+    # 5. SVD on Measurement Space
+    U, S, Vh = torch.linalg.svd(H_norm, full_matrices=False)
+    V = Vh.T
     
-    # Calculate the fractional contribution of each parameter to each Principal Component
-    # We square the eigenvectors to get the variance/information magnitude
-    pc_composition = evecs**2
+    # 6. Project residuals to find Variance Explained per PC
+    c = U.T @ residuals
+    total_variance = torch.sum(residuals**2).item()
+    variance_explained = (c**2).detach().cpu().numpy()
+    pct_explained = (variance_explained / total_variance) * 100.0
     
-    # 4. Plotting
+    pct_unexplained = max(0.0, 100.0 - np.sum(pct_explained))
+    
+    # 7. Calculate Total Parameter Attribution
+    # Matrix multiply the composition (V^2) by the variance explained vector
+    pc_composition = (V**2).detach().cpu().numpy()
+    param_attribution = np.sum(pc_composition * pct_explained, axis=1)
+    
+    # 8. Plotting
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Plot A: Scree Plot (Explained Information)
-    axes[0].bar(range(1, len(evals)+1), explained_info_ratio * 100, alpha=0.7, label="Individual PC")
-    axes[0].plot(range(1, len(evals)+1), cumulative_info * 100, marker='o', color='red', label="Cumulative")
-    axes[0].set_title(f"PCA of Information Space ({num_passes} Passes)")
-    axes[0].set_xlabel("Principal Component (PC)")
-    axes[0].set_ylabel("Explained Information (%)")
-    axes[0].set_xticks(range(1, len(evals)+1))
+    # Plot A: Cumulative Variance Explained (Effective Dimensionality)
+    cumulative_variance = np.cumsum(pct_explained)
+    axes[0].plot(range(1, len(param_names)+1), cumulative_variance, marker='o', linewidth=2, color='red')
+    axes[0].bar(range(1, len(param_names)+1), pct_explained, alpha=0.6, label="Individual PC")
+    axes[0].axhline(95.0, color='black', linestyle='--', label="95% Threshold")
+    
+    axes[0].set_title(f"Effective System Dimensionality ({num_passes} Passes)")
+    axes[0].set_xlabel("Principal Component (Ranked)")
+    axes[0].set_ylabel("Cumulative Variance Explained (%)")
+    axes[0].set_ylim(0, 105)
     axes[0].legend()
     axes[0].grid(True, linestyle='--', alpha=0.6)
     
-    # Plot B: Heatmap of PC Composition
-    sns.heatmap(
-        pc_composition.T, 
-        annot=True, 
-        cmap="YlGnBu", 
-        xticklabels=param_names,
-        yticklabels=[f"PC {i+1}" for i in range(len(evals))],
-        ax=axes[1],
-        fmt=".2f"
-    )
-    axes[1].set_title("Parameter Composition of Principal Components")
-    axes[1].set_xlabel("Modified Equinoctial Elements")
-    axes[1].set_ylabel("Principal Components")
+    # Plot B: Total Parameter Attribution
+    # We add the "Unexplained" variance as the final bar to ensure everything sums to 100%
+    plot_labels = param_names + ["Unmodeled/Noise"]
+    plot_values = list(param_attribution) + [pct_unexplained]
+    colors = ['#2ca02c']*len(param_names) + ['#d62728']
     
-    plt.tight_layout()
-    plt.show()
-
-from torch.func import jacfwd
-
-import numpy as np
-import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
-from astropy.time import Time
-from torch.func import jacfwd
-import dsgp4
-
-def plot_dof_correlation_comparison(data_chunks, tle_base, center_freq, num_passes=2):
-    """
-    Plots the parameter correlation matrix for different DOF configurations
-    (2, 3, and 4 parameters) at a fixed number of passes.
-    """
-    # 1. Define the configurations to compare.
-    # Format: (Title, Parameter Labels, Jacobian Column Indices)
-    # The standard MEE_SSV order is: [n(0), f(1), g(2), h(3), k(4), L(5), B*(6)]
-    configs = [
-        ("2-DOF", ["n", "L"], [0, 5]),
-        ("3-DOF", ["n", "L", "g"], [0, 5, 2]),
-        ("4-DOF", ["n", "L", "f", "g"], [0, 5, 1, 2])
-    ]
+    bars = axes[1].bar(plot_labels, plot_values, color=colors, alpha=0.8)
+    axes[1].set_title("Total Parameter Attribution to System Variance")
+    axes[1].set_ylabel("Total Explained Variance (%)")
+    axes[1].set_ylim(0, 100)
+    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
     
-    chunk = data_chunks[0]
-    
-    # 2. Setup the data for the fixed number of passes
-    active_pass_ids = chunk["pass_ids"][:num_passes]
-    pass_mask = torch.isin(chunk["c"], active_pass_ids)
-    
-    t_active = chunk["t"][pass_mask]
-    d_active_true = chunk["d_true"][pass_mask]
-    c_active = chunk["c"][pass_mask]
-    
-    t_mean_window = float(torch.mean(t_active))
-    tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
-    
-    # Setup the figure for multiple subplots
-    fig, axes = plt.subplots(1, len(configs), figsize=(6 * len(configs), 5.5))
-    
-    # 3. Base Evaluation Setup (Initialize full state to get the full Jacobian)
-    eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
-    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
-    x_eval = eval_ssv.get_initial_state()
-    
-    t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
-    station_model = system.DifferentiableStation(
-        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
-        ref_unix=t_mean_window, 
-        ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
-        # device=device # Uncomment if running strictly on GPU
-    )
-    
-    prop_eval = system.SGP4(ssv=eval_ssv)
-    meas_eval = system.DopplerMeasurement(
-        ssv=eval_ssv, station_model=station_model,
-        freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
-    )
-    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
-    t_since = (t_active - t_mean_window) + 0.277
-    
-    # 4. Compute Full Jacobian ONCE
-    def res_fn(x):
-        return pipe_eval(x=x, tsince=t_since, epoch=t_mean_window, center_freq=center_freq) - d_active_true
-        
-    H_total = jacfwd(res_fn)(x_eval)
-    
-    # 5. Loop through configs and slice the Jacobian dynamically
-    for idx, (title, param_names, col_indices) in enumerate(configs):
-        
-        # Isolate only the specified parameters
-        H_orb = H_total[:, col_indices]
-        
-        # Compute FIM, Covariance, and Correlation
-        sigma_obs = 20.0
-        W = 1.0 / (sigma_obs**2)
-        FIM = H_orb.T @ (H_orb * W)
-        
-        # Use pseudo-inverse
-        Cov = torch.linalg.pinv(FIM)
-        
-        std_dev = torch.sqrt(torch.abs(torch.diag(Cov)))
-        
-        outer_std = torch.outer(std_dev, std_dev) + 1e-16
-        Corr = Cov / outer_std
-        
-        Corr_np = Corr.detach().cpu().numpy()
-        
-        # Calculate the Determinant (Generalized Variance)
-        det_C = np.linalg.det(Corr_np)
-        
-        # 6. Plotting
-        ax = axes[idx] if len(configs) > 1 else axes
-        sns.heatmap(
-            Corr_np, 
-            annot=True, 
-            cmap="coolwarm", 
-            vmin=-1, vmax=1, 
-            xticklabels=param_names,
-            yticklabels=param_names,
-            fmt=".2f",
-            ax=ax,
-            square=True,
-            cbar_kws={"shrink": .8}
-        )
-        
-        # Use scientific notation for the determinant as it will get very small
-        ax.set_title(f"{title} ({num_passes} Passes)\n$\det(C) = {det_C:.2e}$")
-        ax.set_xlabel("Modified Equinoctial Elements")
-        if idx == 0:
-            ax.set_ylabel("Modified Equinoctial Elements")
+    for bar in bars:
+        yval = bar.get_height()
+        if yval > 0.5: # Only label visible bars
+            axes[1].text(bar.get_x() + bar.get_width()/2, yval + 1, f'{yval:.1f}%', ha='center', va='bottom', fontsize=10)
 
     plt.tight_layout()
     plt.show()
-
-# Execution Example:
-# plot_dof_correlation_comparison(data_chunks, tle_base, center_freq, num_passes=2)
 
 import polars as pl
 import pandas as pd
@@ -1044,3 +1276,1330 @@ def generate_rmse_statistics_table(results: list[dict], horizons=["1h", "24h"]):
 # Example execution:
 # summary_table = generate_rmse_statistics_table(experiment_results, horizons=["1h", "24h"])
 # print(summary_table)
+
+def plot_ric_state_variance_attribution(t_gps, r_gps, v_gps, tle_base, epoch_unix):
+    """
+    Performs SVD on the mapping from MEE parameters to the physical RIC state space
+    to prove that n and L strictly govern the dominant physical trajectory errors.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    
+    # 1. Setup a 24-hour window for trajectory analysis
+    mask = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval = t_gps[mask]
+    r_eval = r_gps[mask].to(torch.float64)
+    v_eval = v_gps[mask].to(torch.float64)
+    
+    # 2. Setup SGP4 Forward Model
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(epoch_unix))
+    ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=1, fit_bstar=False)
+    prop = system.SGP4(ssv=ssv)
+    x_eval = ssv.get_initial_state()
+    
+    t_since_mins = (t_eval - epoch_unix) / 60.0
+    
+    # 3. Create a differentiable function that outputs RIC Position
+    def ric_forward_fn(x):
+        r_calc, v_calc = prop(x=x, tsince=t_since_mins)
+        
+        # Construct RIC Basis Vectors using GPS as truth
+        R_hat = r_eval / torch.norm(r_eval, dim=1, keepdim=True)
+        W_vec = torch.cross(r_eval, v_eval, dim=1)
+        W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
+        S_hat = torch.cross(W_hat, R_hat, dim=1)
+        
+        # Project calculated position onto RIC
+        pos_res_R = (r_calc * R_hat).sum(dim=1).unsqueeze(1)
+        pos_res_I = (r_calc * S_hat).sum(dim=1).unsqueeze(1)
+        pos_res_C = (r_calc * W_hat).sum(dim=1).unsqueeze(1)
+        
+        return torch.cat([pos_res_R, pos_res_I, pos_res_C], dim=1)
+        
+    # 4. Compute Jacobian of RIC Position w.r.t MEE Parameters
+    # Shape: (N_times, 3, N_params). We flatten the spatial/time dims for SVD
+    J_ric = jacfwd(ric_forward_fn)(x_eval)
+    J_ric_flat = J_ric.view(-1, J_ric.shape[-1])[:, :len(param_names)]
+    
+    # Normalize columns to compare dimensionless parameters
+    col_norms = torch.norm(J_ric_flat, dim=0)
+    J_norm = J_ric_flat / (col_norms + 1e-16)
+    
+    # 5. Calculate True Physical Residuals
+    with torch.no_grad():
+        r_prior = ric_forward_fn(x_eval)
+        # Truth projected into its own RIC frame is just [R, 0, 0] in ideal conditions,
+        # but the delta is simply the r_prior relative to the origin of the RIC frame
+        true_residuals_flat = r_prior.view(-1) 
+        
+    # 6. Perform SVD on the State Mapping
+    U, S, Vh = torch.linalg.svd(J_norm, full_matrices=False)
+    V = Vh.T
+    
+    c = U.T @ true_residuals_flat
+    total_variance = torch.sum(true_residuals_flat**2).item()
+    pct_explained = ((c**2).detach().cpu().numpy() / total_variance) * 100.0
+    
+    pc_composition = (V**2).detach().cpu().numpy()
+    param_attribution = np.sum(pc_composition * pct_explained[:, None], axis=0)
+    
+    # 7. Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot A: True Trajectory Variance by Axis
+    r_err = r_prior[:, 0].detach().cpu().numpy()
+    i_err = r_prior[:, 1].detach().cpu().numpy()
+    c_err = r_prior[:, 2].detach().cpu().numpy()
+    
+    var_R = np.var(r_err)
+    var_I = np.var(i_err)
+    var_C = np.var(c_err)
+    total_var_ric = var_R + var_I + var_C
+    
+    axes[0].bar(['Radial', 'In-Track', 'Cross-Track'], 
+                [var_R/total_var_ric * 100, var_I/total_var_ric * 100, var_C/total_var_ric * 100], 
+                color=['#1f77b4', '#ff7f0e', '#2ca02c'], alpha=0.8)
+    axes[0].set_title("True Physical Trajectory Variance (24h Forecast)")
+    axes[0].set_ylabel("Percentage of Total Spatial Variance (%)")
+    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    # Plot B: Parameter Attribution to Physical State
+    axes[1].bar(param_names, param_attribution, color='#9467bd', alpha=0.8)
+    axes[1].set_title("MEE Parameter Attribution to Physical State Error")
+    axes[1].set_ylabel("Variance Explained (%)")
+    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.func import jacfwd
+from astropy.time import Time
+import dsgp4
+
+def plot_estimator_utility_space(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes both Measurement (Doppler) Attribution and Physical (RIC) Attribution,
+    mapping parameters into a 2D utility space to justify optimal parameter selection.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    chunk = data_chunks[0]
+    
+    # ---------------------------------------------------------
+    # PART 1: DOPPLER MEASUREMENT PCA (Observability)
+    # ---------------------------------------------------------
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    
+    t_mean_window = float(torch.mean(t_active))
+    tle_window, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    
+    eval_ssv = state.MEE_SSV(init_tle=tle_window, num_measurements=len(t_active))
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    t_ref_astropy = Time(t_mean_window, format="unix", scale="utc")
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+        ref_unix=t_mean_window, 
+        ref_gmst_rad=t_ref_astropy.sidereal_time('mean', 'greenwich').radian,
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model,
+        freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_dopp = (t_active - t_mean_window) + 0.277
+    
+    with torch.no_grad():
+        d_pred = pipe_eval(x=x_eval, tsince=t_since_dopp, epoch=t_mean_window, center_freq=center_freq)
+    dopp_res = d_active_true - d_pred
+    
+    def dopp_forward(x): return pipe_eval(x=x, tsince=t_since_dopp, epoch=t_mean_window, center_freq=center_freq)
+    J_dopp = jacfwd(dopp_forward)(x_eval)[:, :len(param_names)]
+    J_dopp_norm = J_dopp / (torch.norm(J_dopp, dim=0) + 1e-16)
+    
+    U_d, S_d, Vh_d = torch.linalg.svd(J_dopp_norm, full_matrices=False)
+    c_d = U_d.T @ dopp_res
+    pct_explained_dopp = ((c_d**2).detach().cpu().numpy() / torch.sum(dopp_res**2).item()) * 100.0
+    dopp_attribution = np.sum((Vh_d.T**2).detach().cpu().numpy() * pct_explained_dopp, axis=1)
+    
+    # ---------------------------------------------------------
+    # PART 2: PHYSICAL STATE PCA (Explainability)
+    # ---------------------------------------------------------
+    mask_gps = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval = t_gps[mask_gps]
+    r_eval = r_gps[mask_gps].to(torch.float64)
+    v_eval = v_gps[mask_gps].to(torch.float64)
+    t_since_gps = (t_eval - epoch_unix) / 60.0
+    
+    def ric_forward(x):
+        r_calc, v_calc = prop_eval(x=x, tsince=t_since_gps)
+        R_hat = r_eval / torch.norm(r_eval, dim=1, keepdim=True)
+        W_vec = torch.cross(r_eval, v_eval, dim=1)
+        W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
+        S_hat = torch.cross(W_hat, R_hat, dim=1)
+        return torch.cat([
+            (r_calc * R_hat).sum(dim=1).unsqueeze(1),
+            (r_calc * S_hat).sum(dim=1).unsqueeze(1),
+            (r_calc * W_hat).sum(dim=1).unsqueeze(1)
+        ], dim=1)
+        
+    J_ric = jacfwd(ric_forward)(x_eval).view(-1, len(x_eval))[:, :len(param_names)]
+    J_ric_norm = J_ric / (torch.norm(J_ric, dim=0) + 1e-16)
+    
+    with torch.no_grad():
+        r_prior = ric_forward(x_eval).view(-1)
+        
+    U_r, S_r, Vh_r = torch.linalg.svd(J_ric_norm, full_matrices=False)
+    c_r = U_r.T @ r_prior
+    pct_explained_ric = ((c_r**2).detach().cpu().numpy() / torch.sum(r_prior**2).item()) * 100.0
+    ric_attribution = np.sum((Vh_r.T**2).detach().cpu().numpy() * pct_explained_ric[:, None], axis=0)
+
+    # ---------------------------------------------------------
+    # PART 3: ESTIMATION UTILITY INDEX (EUI)
+    # ---------------------------------------------------------
+    # EUI is the geometric mean (or product) of Measurement Visibility and Physical Impact
+    # Normalized so the highest value is 1.0 (or 100%)
+    utility_index = np.sqrt(dopp_attribution * ric_attribution)
+    utility_index = (utility_index / np.max(utility_index)) * 100.0
+    
+    # ---------------------------------------------------------
+    # 4. PLOTTING
+    # ---------------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot A: 2D Pareto Front Space
+    axes[0].scatter(dopp_attribution, ric_attribution, color='blue', s=100, zorder=5)
+    
+    # Add parameter labels
+    for i, txt in enumerate(param_names):
+        axes[0].annotate(txt, (dopp_attribution[i], ric_attribution[i]), 
+                         xytext=(5, 5), textcoords='offset points', fontsize=12, fontweight='bold')
+        
+    # Draw quadrants based on medians or hard thresholds to show the "Sweet Spot"
+    axes[0].axvline(np.median(dopp_attribution), color='gray', linestyle='--', alpha=0.5)
+    axes[0].axhline(np.median(ric_attribution), color='gray', linestyle='--', alpha=0.5)
+    
+    # Shade the "Optimal Estimation Region" (Top Right Quadrant)
+    axes[0].axvspan(np.median(dopp_attribution), max(dopp_attribution)*1.1, 
+                    ymin=np.median(ric_attribution)/max(ric_attribution)*0.9, ymax=1, 
+                    color='green', alpha=0.1, label='Optimal Estimation Region')
+
+    axes[0].set_title(f"Observability-Explainability Space ({num_passes} Passes)")
+    axes[0].set_xlabel("Measurement Observability (Doppler Variance Explained %)")
+    axes[0].set_ylabel("Physical State Explainability (RIC Variance Explained %)")
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+    axes[0].legend(loc='upper left')
+    
+    # Plot B: Estimation Utility Index
+    # Sort for cleaner presentation
+    sort_idx = np.argsort(utility_index)[::-1]
+    sorted_params = [param_names[i] for i in sort_idx]
+    sorted_utility = utility_index[sort_idx]
+    
+    colors = ['#2ca02c' if p in ['n', 'L'] else '#1f77b4' for p in sorted_params]
+    
+    bars = axes[1].bar(sorted_params, sorted_utility, color=colors, alpha=0.8)
+    axes[1].set_title("Estimation Utility Index (Cross-Domain Alignment)")
+    axes[1].set_ylabel("Relative Utility Score (%)")
+    axes[1].set_ylim(0, 110)
+    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    for bar in bars:
+        yval = bar.get_height()
+        axes[1].text(bar.get_x() + bar.get_width()/2, yval + 1, f'{yval:.1f}', ha='center', va='bottom', fontsize=10)
+
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+# plot_estimator_utility_space(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import jacfwd
+import dsgp4
+
+def plot_observability_state_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the Measurement PC1 and State PC1, calculates their alignment index,
+    and plots a clean comparison of parameter importance.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup Measurement (Doppler) Space ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+        ref_unix=t_mean_window, ref_gmst_rad=0.0 # simplified for jacobian
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    # Compute Measurement Jacobian & PC1
+    def meas_forward(x):
+        return pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        
+    J_meas = jacfwd(meas_forward)(x_eval)[:, :len(param_names)]
+    J_meas_norm = J_meas / (torch.norm(J_meas, dim=0) + 1e-16)
+    _, _, Vh_meas = torch.linalg.svd(J_meas_norm, full_matrices=False)
+    v_meas = Vh_meas[0, :].detach().cpu().numpy() # PC1 of Measurement
+    v_meas_importance = v_meas**2 # Fractional variance
+    
+    # --- 2. Setup Physical State (RIC) Space ---
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    v_eval_state = v_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+    
+    def state_forward(x):
+        r_calc, v_calc = prop_eval(x=x, tsince=t_since_state)
+        # Simplified RIC magnitude mapping for variance
+        R_hat = r_eval_state / torch.norm(r_eval_state, dim=1, keepdim=True)
+        W_vec = torch.cross(r_eval_state, v_eval_state, dim=1)
+        W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
+        S_hat = torch.cross(W_hat, R_hat, dim=1)
+        
+        pos_R = (r_calc * R_hat).sum(dim=1).unsqueeze(1)
+        pos_I = (r_calc * S_hat).sum(dim=1).unsqueeze(1)
+        pos_C = (r_calc * W_hat).sum(dim=1).unsqueeze(1)
+        return torch.cat([pos_R, pos_I, pos_C], dim=1)
+
+    J_state = jacfwd(state_forward)(x_eval).view(-1, len(x_eval))[:, :len(param_names)]
+    J_state_norm = J_state / (torch.norm(J_state, dim=0) + 1e-16)
+    _, _, Vh_state = torch.linalg.svd(J_state_norm, full_matrices=False)
+    v_state = Vh_state[0, :].detach().cpu().numpy() # PC1 of Physical State
+    v_state_importance = v_state**2
+    
+    # --- 3. Compute Alignment Index ---
+    # Dot product of the principal eigenvectors
+    alignment_index = np.abs(np.dot(v_meas, v_state))
+    
+    # --- 4. Plotting ---
+    # Sort parameters by their importance to the Physical State
+    sorted_indices = np.argsort(v_state_importance)[::-1]
+    sorted_names = [param_names[i] for i in sorted_indices]
+    sorted_state = v_state_importance[sorted_indices] * 100
+    sorted_meas = v_meas_importance[sorted_indices] * 100
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    x = np.arange(len(sorted_names))
+    width = 0.35
+    
+    ax.bar(x - width/2, sorted_state, width, label='Physical Error (RIC State PC1)', color='#1f77b4')
+    ax.bar(x + width/2, sorted_meas, width, label='Sensor Sensitivity (Doppler PC1)', color='#ff7f0e')
+    
+    ax.set_title(f"Sensor-State Alignment Index: $\eta = {alignment_index:.3f}$\n({num_passes} Doppler Passes)")
+    ax.set_ylabel('Fractional Parameter Importance (%)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(sorted_names)
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import jacfwd
+import dsgp4
+
+def plot_full_observability_state_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the Generalized Observability-State Alignment Index by comparing 
+    the full, variance-weighted parameter spaces of the sensor and the physical trajectory.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup Data & Base Evaluation ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, 
+        ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    # --- 2. Measurement Space (Doppler) PCA & Weighting ---
+    with torch.no_grad():
+        d_pred_init = pipe_eval(x=x_eval, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+    residuals_meas = d_active_true - d_pred_init
+    
+    def meas_forward(x):
+        return pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        
+    J_meas = jacfwd(meas_forward)(x_eval)[:, :len(param_names)]
+    J_meas_norm = J_meas / (torch.norm(J_meas, dim=0) + 1e-16)
+    U_m, _, Vh_m = torch.linalg.svd(J_meas_norm, full_matrices=False)
+    V_m = Vh_m.T
+    
+    # Variance explained by each measurement PC
+    c_m = U_m.T @ residuals_meas
+    w_m = (c_m**2).detach().cpu().numpy()
+    w_m = w_m / (np.sum(w_m) + 1e-16)  # Normalize weights to sum to 1
+    
+    # Measurement Attribution Matrix
+    C_m = V_m.detach().cpu().numpy() @ np.diag(w_m) @ Vh_m.detach().cpu().numpy()
+    
+    # --- 3. Physical State (RIC) PCA & Weighting ---
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    v_eval_state = v_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+    
+    def state_forward(x):
+        r_calc, v_calc = prop_eval(x=x, tsince=t_since_state)
+        R_hat = r_eval_state / torch.norm(r_eval_state, dim=1, keepdim=True)
+        W_vec = torch.cross(r_eval_state, v_eval_state, dim=1)
+        W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
+        S_hat = torch.cross(W_hat, R_hat, dim=1)
+        
+        pos_R = (r_calc * R_hat).sum(dim=1).unsqueeze(1)
+        pos_I = (r_calc * S_hat).sum(dim=1).unsqueeze(1)
+        pos_C = (r_calc * W_hat).sum(dim=1).unsqueeze(1)
+        return torch.cat([pos_R, pos_I, pos_C], dim=1)
+
+    with torch.no_grad():
+        r_prior = state_forward(x_eval)
+        residuals_state = r_prior.view(-1)
+        
+    J_state = jacfwd(state_forward)(x_eval).view(-1, len(x_eval))[:, :len(param_names)]
+    J_state_norm = J_state / (torch.norm(J_state, dim=0) + 1e-16)
+    U_s, _, Vh_s = torch.linalg.svd(J_state_norm, full_matrices=False)
+    V_s = Vh_s.T
+    
+    # Variance explained by each physical state PC
+    c_s = U_s.T @ residuals_state
+    w_s = (c_s**2).detach().cpu().numpy()
+    w_s = w_s / (np.sum(w_s) + 1e-16) # Normalize weights to sum to 1
+    
+    # State Attribution Matrix
+    C_s = V_s.detach().cpu().numpy() @ np.diag(w_s) @ Vh_s.detach().cpu().numpy()
+    
+    # --- 4. Compute Generalized Alignment Index (RV Coefficient) ---
+    # This is exactly your proposed weighted sum of vector correlations, normalized to [0, 1]
+    inner_product = np.trace(C_m @ C_s)
+    norm_m = np.linalg.norm(C_m, ord='fro')
+    norm_s = np.linalg.norm(C_s, ord='fro')
+    alignment_index = inner_product / (norm_m * norm_s + 1e-16)
+    
+    # --- 5. Extract Total Parameter Importances for Plotting ---
+    # The diagonal of the attribution matrices gives the total weighted parameter importance
+    param_importance_m = np.diag(C_m) * 100
+    param_importance_s = np.diag(C_s) * 100
+    
+    # --- 6. Plotting ---
+    sorted_indices = np.argsort(param_importance_s)[::-1]
+    sorted_names = [param_names[i] for i in sorted_indices]
+    sorted_state = param_importance_s[sorted_indices]
+    sorted_meas = param_importance_m[sorted_indices]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(sorted_names))
+    width = 0.35
+    
+    ax.bar(x - width/2, sorted_state, width, label='Physical State Attribution ($C_{\mathcal{X}}$)', color='#1f77b4')
+    ax.bar(x + width/2, sorted_meas, width, label='Sensor Measurement Attribution ($C_{\mathcal{H}}$)', color='#ff7f0e')
+    
+    ax.set_title(f"Generalized Observability-State Alignment: $\eta_{{total}} = {alignment_index:.3f}$\n({num_passes} Doppler Passes)")
+    ax.set_ylabel('Total Parameter Importance (%)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(sorted_names)
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import jacfwd
+import dsgp4
+
+def plot_decoupled_state_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes parameter attribution separately for the Doppler Sensor, 
+    Physical Position (RIC), and Physical Velocity (RIC).
+    """
+    param_names = ["n", "f", "g", "h", "k", "L"]
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup Data & Base Evaluation ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=chunk["c"][pass_mask])
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    # --- 2. Measurement Space (Doppler) Attribution ---
+    with torch.no_grad():
+        d_pred_init = pipe_eval(x=x_eval, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+    residuals_meas = d_active_true - d_pred_init
+    
+    def meas_forward(x):
+        return pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        
+    J_meas = jacfwd(meas_forward)(x_eval)[:, :len(param_names)]
+    J_meas_norm = J_meas / (torch.norm(J_meas, dim=0) + 1e-16)
+    U_m, _, Vh_m = torch.linalg.svd(J_meas_norm, full_matrices=False)
+    
+    w_m = (U_m.T @ residuals_meas)**2
+    w_m = (w_m / (torch.sum(w_m) + 1e-16)).detach().cpu().numpy()
+    C_m = Vh_m.T.detach().cpu().numpy() @ np.diag(w_m) @ Vh_m.detach().cpu().numpy()
+    
+    # --- 3. Decoupled Physical State (Position vs Velocity) ---
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    v_eval_state = v_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+    
+    def state_forward_decoupled(x):
+        r_calc, v_calc = prop_eval(x=x, tsince=t_since_state)
+        R_hat = r_eval_state / torch.norm(r_eval_state, dim=1, keepdim=True)
+        W_vec = torch.cross(r_eval_state, v_eval_state, dim=1)
+        W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
+        S_hat = torch.cross(W_hat, R_hat, dim=1)
+        
+        # Position RIC
+        pos_R = (r_calc * R_hat).sum(dim=1).unsqueeze(1)
+        pos_I = (r_calc * S_hat).sum(dim=1).unsqueeze(1)
+        pos_C = (r_calc * W_hat).sum(dim=1).unsqueeze(1)
+        pos_ric = torch.cat([pos_R, pos_I, pos_C], dim=1)
+        
+        # Velocity RIC
+        vel_R = (v_calc * R_hat).sum(dim=1).unsqueeze(1)
+        vel_I = (v_calc * S_hat).sum(dim=1).unsqueeze(1)
+        vel_C = (v_calc * W_hat).sum(dim=1).unsqueeze(1)
+        vel_ric = torch.cat([vel_R, vel_I, vel_C], dim=1)
+        
+        return pos_ric, vel_ric
+
+    with torch.no_grad():
+        r_prior, v_prior = state_forward_decoupled(x_eval)
+        res_pos = r_prior.view(-1)
+        res_vel = v_prior.view(-1)
+        
+    # Get Jacobians
+    J_full = jacfwd(state_forward_decoupled)(x_eval)
+    J_pos = J_full[0].view(-1, len(x_eval))[:, :len(param_names)]
+    J_vel = J_full[1].view(-1, len(x_eval))[:, :len(param_names)]
+    
+    # Position SVD
+    J_pos_norm = J_pos / (torch.norm(J_pos, dim=0) + 1e-16)
+    U_p, _, Vh_p = torch.linalg.svd(J_pos_norm, full_matrices=False)
+    w_p = (U_p.T @ res_pos)**2
+    w_p = (w_p / (torch.sum(w_p) + 1e-16)).detach().cpu().numpy()
+    C_p = Vh_p.T.detach().cpu().numpy() @ np.diag(w_p) @ Vh_p.detach().cpu().numpy()
+    
+    # Velocity SVD
+    J_vel_norm = J_vel / (torch.norm(J_vel, dim=0) + 1e-16)
+    U_v, _, Vh_v = torch.linalg.svd(J_vel_norm, full_matrices=False)
+    w_v = (U_v.T @ res_vel)**2
+    w_v = (w_v / (torch.sum(w_v) + 1e-16)).detach().cpu().numpy()
+    C_v = Vh_v.T.detach().cpu().numpy() @ np.diag(w_v) @ Vh_v.detach().cpu().numpy()
+    
+    # --- 4. Plotting ---
+    imp_meas = np.diag(C_m) * 100
+    imp_pos = np.diag(C_p) * 100
+    imp_vel = np.diag(C_v) * 100
+    
+    sorted_indices = np.argsort(imp_pos)[::-1]
+    sorted_names = [param_names[i] for i in sorted_indices]
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = np.arange(len(sorted_names))
+    width = 0.25
+    
+    ax.bar(x - width, imp_pos[sorted_indices], width, label='Position Error Attribution', color='#1f77b4')
+    ax.bar(x, imp_vel[sorted_indices], width, label='Velocity Error Attribution', color='#2ca02c')
+    ax.bar(x + width, imp_meas[sorted_indices], width, label='Doppler Sensor Attribution', color='#ff7f0e')
+    
+    ax.set_title(f"Decoupled Kinematic Attribution Analysis ({num_passes} Passes)")
+    ax.set_ylabel('Total Parameter Importance (%)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(sorted_names)
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.func import jacfwd
+import dsgp4
+
+def plot_pas_and_correlation(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Plots the Parameter Alignment Score (PAS) alongside the Parameter Correlation Matrix
+    to justify parameter selection based on high utility and low collinearity.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L"]
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup Data & Base Evaluation ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    # --- 2. Measurement Space: Attribution & Correlation ---
+    with torch.no_grad():
+        d_pred_init = pipe_eval(x=x_eval, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+    residuals_meas = d_active_true - d_pred_init
+    
+    def meas_forward(x):
+        return pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        
+    J_meas = jacfwd(meas_forward)(x_eval)[:, :len(param_names)]
+    
+    # A. Measurement Attribution via SVD
+    J_meas_norm = J_meas / (torch.norm(J_meas, dim=0) + 1e-16)
+    U_m, _, Vh_m = torch.linalg.svd(J_meas_norm, full_matrices=False)
+    w_m = (U_m.T @ residuals_meas)**2
+    w_m = (w_m / (torch.sum(w_m) + 1e-16)).detach().cpu().numpy()
+    C_m = Vh_m.T.detach().cpu().numpy() @ np.diag(w_m) @ Vh_m.detach().cpu().numpy()
+    imp_meas = np.diag(C_m)
+    
+    # B. Parameter Correlation via Fisher Information Matrix
+    sigma_obs = 20.0
+    W = 1.0 / (sigma_obs**2)
+    FIM = J_meas.T @ (J_meas * W)
+    Cov = torch.linalg.pinv(FIM)
+    std_dev = torch.sqrt(torch.abs(torch.diag(Cov)))
+    outer_std = torch.outer(std_dev, std_dev) + 1e-16
+    Corr_np = (Cov / outer_std).detach().cpu().numpy()
+    
+    # --- 3. Physical State Space: Decoupled Attribution ---
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    v_eval_state = v_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+    
+    def state_forward_decoupled(x):
+        r_calc, v_calc = prop_eval(x=x, tsince=t_since_state)
+        R_hat = r_eval_state / torch.norm(r_eval_state, dim=1, keepdim=True)
+        W_vec = torch.cross(r_eval_state, v_eval_state, dim=1)
+        W_hat = W_vec / torch.norm(W_vec, dim=1, keepdim=True)
+        S_hat = torch.cross(W_hat, R_hat, dim=1)
+        
+        pos_ric = torch.cat([(r_calc * R_hat).sum(dim=1).unsqueeze(1), (r_calc * S_hat).sum(dim=1).unsqueeze(1), (r_calc * W_hat).sum(dim=1).unsqueeze(1)], dim=1)
+        vel_ric = torch.cat([(v_calc * R_hat).sum(dim=1).unsqueeze(1), (v_calc * S_hat).sum(dim=1).unsqueeze(1), (v_calc * W_hat).sum(dim=1).unsqueeze(1)], dim=1)
+        return pos_ric, vel_ric
+
+    with torch.no_grad():
+        r_prior, v_prior = state_forward_decoupled(x_eval)
+        res_pos, res_vel = r_prior.view(-1), v_prior.view(-1)
+        
+    J_full = jacfwd(state_forward_decoupled)(x_eval)
+    J_pos = J_full[0].view(-1, len(x_eval))[:, :len(param_names)]
+    J_vel = J_full[1].view(-1, len(x_eval))[:, :len(param_names)]
+    
+    # Position SVD
+    J_pos_norm = J_pos / (torch.norm(J_pos, dim=0) + 1e-16)
+    U_p, _, Vh_p = torch.linalg.svd(J_pos_norm, full_matrices=False)
+    w_p = (U_p.T @ res_pos)**2
+    w_p = (w_p / (torch.sum(w_p) + 1e-16)).detach().cpu().numpy()
+    imp_pos = np.diag(Vh_p.T.detach().cpu().numpy() @ np.diag(w_p) @ Vh_p.detach().cpu().numpy())
+    
+    # Velocity SVD
+    J_vel_norm = J_vel / (torch.norm(J_vel, dim=0) + 1e-16)
+    U_v, _, Vh_v = torch.linalg.svd(J_vel_norm, full_matrices=False)
+    w_v = (U_v.T @ res_vel)**2
+    w_v = (w_v / (torch.sum(w_v) + 1e-16)).detach().cpu().numpy()
+    imp_vel = np.diag(Vh_v.T.detach().cpu().numpy() @ np.diag(w_v) @ Vh_v.detach().cpu().numpy())
+    
+    # --- 4. Calculate Parameter Alignment Scores (PAS) ---
+    # Geometric mean of measurement attribution and physical attribution
+    pas_pos = np.sqrt(imp_meas * imp_pos) * 100
+    pas_vel = np.sqrt(imp_meas * imp_vel) * 100
+    
+    # --- 5. Plotting ---
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot A: PAS Scores
+    sorted_indices = np.argsort(pas_pos)[::-1]
+    sorted_names = [param_names[i] for i in sorted_indices]
+    
+    x = np.arange(len(sorted_names))
+    width = 0.35
+    
+    axes[0].bar(x - width/2, pas_pos[sorted_indices], width, label='PAS (Position Error)', color='#1f77b4')
+    axes[0].bar(x + width/2, pas_vel[sorted_indices], width, label='PAS (Velocity Error)', color='#2ca02c')
+    
+    axes[0].set_title(f"Parameter Alignment Score (PAS)\n({num_passes} Passes)")
+    axes[0].set_ylabel('Alignment Index (%)')
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(sorted_names)
+    axes[0].legend()
+    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    # Plot B: Parameter Correlation Heatmap
+    sns.heatmap(
+        Corr_np, annot=True, cmap="coolwarm", vmin=-1, vmax=1, 
+        xticklabels=param_names, yticklabels=param_names, fmt=".2f",
+        ax=axes[1], square=True, cbar_kws={"shrink": .8}
+    )
+    axes[1].set_title(f"Parameter Correlation Matrix\n({num_passes} Passes)")
+    axes[1].set_xlabel("Modified Equinoctial Elements")
+    axes[1].set_ylabel("Modified Equinoctial Elements")
+
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+# plot_pas_and_correlation(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import jacfwd
+import dsgp4
+import diffod.state as state
+import diffod.functional.system as system
+from diffod.utils import unix_to_mjd
+
+def plot_residual_explainability_r2(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the Single-Parameter Explained Variance (R^2) by calculating the 
+    squared cosine similarity between the Jacobian columns and the true residuals.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup Data ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=chunk["c"][pass_mask])
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    # --- 2. Compute Doppler R^2 ---
+    def meas_forward(x):
+        return pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        
+    with torch.no_grad():
+        d_pred = meas_forward(x_eval)
+        r_dopp = (d_active_true - d_pred).view(-1)
+        
+    J_dopp = jacfwd(meas_forward)(x_eval)[:, :len(param_names)]
+    
+    r2_dopp = []
+    for i in range(len(param_names)):
+        J_i = J_dopp[:, i]
+        cos_sim = torch.dot(J_i, r_dopp) / (torch.norm(J_i) * torch.norm(r_dopp) + 1e-16)
+        r2_dopp.append((cos_sim**2).item() * 100)
+        
+    # --- 3. Compute Physical State (Position & Velocity) R^2 ---
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    v_eval_state = v_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+    
+    def state_forward_decoupled(x):
+        r_calc, v_calc = prop_eval(x=x, tsince=t_since_state)
+        # We compute raw Cartesian residuals for variance to avoid RIC projection artifacts
+        return r_calc, v_calc
+
+    with torch.no_grad():
+        r_calc, v_calc = state_forward_decoupled(x_eval)
+        r_pos = (r_eval_state - r_calc).view(-1)
+        r_vel = (v_eval_state - v_calc).view(-1)
+        
+    J_full = jacfwd(state_forward_decoupled)(x_eval)
+    J_pos = J_full[0].view(-1, len(x_eval))[:, :len(param_names)]
+    J_vel = J_full[1].view(-1, len(x_eval))[:, :len(param_names)]
+    
+    r2_pos = []
+    r2_vel = []
+    for i in range(len(param_names)):
+        J_pi = J_pos[:, i]
+        cos_sim_p = torch.dot(J_pi, r_pos) / (torch.norm(J_pi) * torch.norm(r_pos) + 1e-16)
+        r2_pos.append((cos_sim_p**2).item() * 100)
+        
+        J_vi = J_vel[:, i]
+        cos_sim_v = torch.dot(J_vi, r_vel) / (torch.norm(J_vi) * torch.norm(r_vel) + 1e-16)
+        r2_vel.append((cos_sim_v**2).item() * 100)
+        
+    # --- 4. Plotting ---
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = np.arange(len(param_names))
+    width = 0.25
+    
+    ax.bar(x - width, r2_pos, width, label='Position Error Explained', color='#1f77b4')
+    ax.bar(x, r2_vel, width, label='Velocity Error Explained', color='#2ca02c')
+    ax.bar(x + width, r2_dopp, width, label='Doppler Error Explained', color='#ff7f0e')
+    
+    ax.set_title(f"Single-Parameter Explained Variance ($R^2$)\n({num_passes} Passes, 24h Forecast)")
+    ax.set_ylabel('Variance Explained by Parameter (%)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(param_names)
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+# plot_residual_explainability_r2(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import hessian
+import dsgp4
+
+def plot_exact_hessian_alignment(data_chunks, t_gps, r_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the Exact Hessian of the Sensor Loss and Physical Trajectory Loss,
+    evaluates their alignment, and plots the raw curvature per parameter.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    chunk = data_chunks[0]
+    
+    # --- Setup Base Evaluation ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=chunk["c"][pass_mask])
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+
+    # --- 1. Define Scalar Objective Functions (Loss) ---
+    def sensor_loss_fn(x):
+        # Mean Squared Error of the Doppler curve
+        d_pred = pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        return torch.mean((d_active_true - d_pred)**2)
+
+    def trajectory_loss_fn(x):
+        # Mean Squared Error of the 3D Position over 24 hours
+        r_calc, _ = prop_eval(x=x, tsince=t_since_state)
+        return torch.mean(torch.sum((r_eval_state - r_calc)**2, dim=1))
+
+    # --- 2. Compute Exact Hessians ---
+    # hessian() computes the full matrix of second partial derivatives
+    H_meas_full = hessian(sensor_loss_fn)(x_eval)
+    H_state_full = hessian(trajectory_loss_fn)(x_eval)
+    
+    # Isolate the orbital parameters (top-left 7x7 block)
+    H_meas = H_meas_full[:len(param_names), :len(param_names)]
+    H_state = H_state_full[:len(param_names), :len(param_names)]
+    
+    # Normalize Hessians to compare their structural geometry, not raw magnitudes
+    H_meas_norm = H_meas / (torch.norm(H_meas, p='fro') + 1e-16)
+    H_state_norm = H_state / (torch.norm(H_state, p='fro') + 1e-16)
+    
+    # --- 3. Compute Hessian Alignment Metric ---
+    # Frobenius inner product = trace(A^T B)
+    hessian_alignment = torch.trace(H_meas_norm.T @ H_state_norm).item()
+    
+    # --- 4. Extract Curvature for Plotting ---
+    # The absolute diagonal elements represent the pure convexity/steepness per parameter
+    curv_meas = torch.abs(torch.diag(H_meas_norm)).detach().cpu().numpy()
+    curv_state = torch.abs(torch.diag(H_state_norm)).detach().cpu().numpy()
+    
+    # --- 5. Plotting ---
+    sorted_indices = np.argsort(curv_state)[::-1]
+    sorted_names = [param_names[i] for i in sorted_indices]
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(sorted_names))
+    width = 0.35
+    
+    ax.bar(x - width/2, curv_state[sorted_indices] * 100, width, label='Physical Trajectory Curvature ($H_{state}$)', color='#1f77b4')
+    ax.bar(x + width/2, curv_meas[sorted_indices] * 100, width, label='Sensor Curvature ($H_{meas}$)', color='#ff7f0e')
+    
+    ax.set_title(f"Exact Hessian Curvature Alignment: $\eta_{{Hessian}} = {hessian_alignment:.3f}$\n({num_passes} Doppler Passes)")
+    ax.set_ylabel('Relative Loss Landscape Curvature (%)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(sorted_names)
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+# plot_exact_hessian_alignment(data_chunks, t_gps, r_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import grad, hessian
+import dsgp4
+import diffod.state as state
+import diffod.functional.system as system
+from diffod.utils import unix_to_mjd
+from astropy.time import Time
+
+# import numpy as np
+# import torch
+# import matplotlib.pyplot as plt
+# from torch.autograd.functional import grad, hessian
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import grad, hessian
+import dsgp4
+import diffod.state as state
+import diffod.functional.system as system
+from diffod.utils import unix_to_mjd
+from astropy.time import Time
+
+def plot_objective_sensitivity_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the Gradient (1st-order) and Hessian diagonal (2nd-order) of the 
+    RMSE objective functions for Doppler, Position, and Velocity.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    num_params = len(param_names)
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup Data & Forward Models ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    c_active = chunk["c"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=c_active)
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv, use_pretrained_model=False)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    mask_24h = (t_gps >= epoch_unix) & (t_gps <= epoch_unix + 86400)
+    t_eval_state = t_gps[mask_24h]
+    r_eval_state = r_gps[mask_24h].to(torch.float64)
+    v_eval_state = v_gps[mask_24h].to(torch.float64)
+    t_since_state = (t_eval_state - epoch_unix) / 60.0
+    
+    # --- 2. Define Scalar Objective Functions (RMSE) ---
+    def loss_doppler(x):
+        d_pred = pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        return torch.sqrt(torch.mean((d_active_true - d_pred)**2))
+        
+    def loss_pos(x):
+        r_calc, _ = prop_eval(x=x, tsince=t_since_state)
+        # RMSE of 3D distance
+        return torch.sqrt(torch.mean(torch.sum((r_calc - r_eval_state)**2, dim=1)))
+
+    def loss_vel(x):
+        _, v_calc = prop_eval(x=x, tsince=t_since_state)
+        return torch.sqrt(torch.mean(torch.sum((v_calc - v_eval_state)**2, dim=1)))
+
+    # --- 3. Compute Gradients and Hessians ---
+    def extract_sensitivities(loss_fn):
+        # 1st Order: Gradient vector
+        g = grad(loss_fn)(x_eval)[:num_params]
+        # 2nd Order: Hessian matrix -> Extract absolute diagonal (curvature)
+        h = hessian(loss_fn)(x_eval)[:num_params, :num_params]
+        h_diag = torch.abs(torch.diag(h))
+        
+        # Normalize to strictly compare directional shapes (L2 norm)
+        g_norm = (torch.abs(g) / torch.norm(g)).detach().cpu().numpy()
+        h_norm = (h_diag / torch.norm(h_diag)).detach().cpu().numpy()
+        return np.abs(g.detach().cpu().numpy()), np.abs(h_diag.detach().cpu().numpy())
+
+    g_dopp, h_dopp = extract_sensitivities(loss_doppler)
+    g_pos, h_pos = extract_sensitivities(loss_pos)
+    g_vel, h_vel = extract_sensitivities(loss_vel)
+    
+    # --- 4. Compute Alignment Metrics (Cosine Similarities) ---
+    # Gradient Alignment (How well does the sensor error direction match the physical error direction?)
+    align_grad_pos = np.dot(g_dopp, g_pos)
+    align_grad_vel = np.dot(g_dopp, g_vel)
+    
+    # Hessian Alignment (How well does the sensor curvature match the physical curvature?)
+    align_hess_pos = np.dot(h_dopp, h_pos)
+    align_hess_vel = np.dot(h_dopp, h_vel)
+    
+    # --- 5. Plotting ---
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    x = np.arange(num_params)
+    width = 0.25
+    
+    # Plot 1st-Order (Gradients)
+    axes[0].bar(x - width, np.log(g_pos), width, label='Position Gradient', color='#1f77b4')
+    axes[0].bar(x, np.log(g_vel), width, label='Velocity Gradient', color='#2ca02c')
+    axes[0].bar(x + width, np.log(g_dopp), width, label='Doppler Sensor Gradient', color='#ff7f0e')
+    axes[0].set_title(f"1st-Order Sensitivity (RMSE Gradients)")
+    axes[0].set_ylabel("Logarithmic Gradient Magnitude")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(param_names)
+    axes[0].legend()
+    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    # Plot 2nd-Order (Hessian Curvature)
+    axes[1].bar(x - width, np.log(h_pos), width, label='Position Curvature', color='#1f77b4')
+    axes[1].bar(x, np.log(h_vel), width, label='Velocity Curvature', color='#2ca02c')
+    axes[1].bar(x + width, np.log(h_dopp), width, label='Doppler Sensor Curvature', color='#ff7f0e')
+    axes[1].set_title(f"2nd-Order Sensitivity (RMSE Hessian Diagonal)")
+    axes[1].set_ylabel("Logarithmic Curvature Magnitude")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(param_names)
+    axes[1].legend()
+    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+# plot_objective_sensitivity_alignment(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from torch.func import grad, hessian
+import dsgp4
+import diffod.state as state
+import diffod.functional.system as system
+from diffod.utils import unix_to_mjd
+from astropy.time import Time
+
+def analyze_hessian_topology(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the parameter-scaled Hessian and analyzes its eigenspectrum 
+    to detect flat valleys and saddle points in the loss landscape.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L", "B*"]
+    num_params = len(param_names)
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=chunk["c"][pass_mask])
+    x_eval = eval_ssv.get_initial_state()
+    
+    # Scale matrix: Diagonal matrix of the absolute parameter values
+    # We add a small epsilon to avoid scaling by zero for highly circular/equatorial orbits
+    x_scale = torch.abs(x_eval[:num_params]) + 1e-6
+    S = torch.diag(x_scale)
+    
+    # --- 2. Setup Forward Models ---
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    def loss_doppler(x):
+        d_pred = pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        return torch.sqrt(torch.mean((d_active_true - d_pred)**2))
+
+    # --- 3. Compute Full Hessian and Apply Scaling ---
+    # Extract the raw 7x7 Hessian
+    H_raw = hessian(loss_doppler)(x_eval)[:num_params, :num_params]
+    
+    # Scale the Hessian: H_scaled = S * H_raw * S
+    # This transforms the Hessian into "fractional variance" space, making parameters comparable
+    H_scaled = S @ H_raw @ S
+    
+    # --- 4. Eigensystem Analysis (Saddle Point Detection) ---
+    evals, evecs = torch.linalg.eigh(H_scaled)
+    evals_np = evals.detach().cpu().numpy()
+    evecs_np = evecs.detach().cpu().numpy()
+    
+    # Detect negative eigenvalues
+    is_saddle = np.any(evals_np < -1e-8) # Small threshold for numerical noise
+    
+    # --- 5. Plotting ---
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot A: The Eigenspectrum
+    colors = ['red' if val < 0 else 'blue' for val in evals_np]
+    axes[0].bar(range(1, num_params + 1), evals_np, color=colors, alpha=0.8)
+    axes[0].axhline(0, color='black', linewidth=1)
+    
+    title_suffix = "SADDLE POINT DETECTED" if is_saddle else "Convex (Local Minimum)"
+    axes[0].set_title(f"Scaled Hessian Eigenspectrum\nTopology: {title_suffix}")
+    axes[0].set_xlabel("Eigenvalue Rank")
+    axes[0].set_ylabel("Curvature Magnitude (Log Scale)")
+    
+    # Use symlog to cleanly show positive, zero, and negative eigenvalues on a log scale
+    axes[0].set_yscale('symlog', linthresh=1e-10)
+    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    # Plot B: Eigenvector Composition of the most problematic directions
+    # We plot the composition of the smallest/most negative eigenvalue (Rank 1)
+    # and the largest eigenvalue (Rank 7)
+    width = 0.35
+    x_idx = np.arange(num_params)
+    
+    axes[1].bar(x_idx - width/2, evecs_np[:, 0]**2 * 100, width, label=f"Min Curvature ($\lambda_1 = {evals_np[0]:.1e}$)", color='red' if evals_np[0] < 0 else 'lightblue')
+    axes[1].bar(x_idx + width/2, evecs_np[:, -1]**2 * 100, width, label=f"Max Curvature ($\lambda_7 = {evals_np[-1]:.1e}$)", color='darkblue')
+    
+    axes[1].set_title("Parameter Composition of Curvature Extremes")
+    axes[1].set_xticks(x_idx)
+    axes[1].set_xticklabels(param_names)
+    axes[1].set_ylabel("Fractional Composition (%)")
+    axes[1].legend()
+    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Execution:
+# analyze_hessian_topology(data_chunks, t_gps, r_gps, v_gps, tle_base, center_freq, epoch_unix, num_passes=3)
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.func import grad, hessian
+import dsgp4
+import diffod.state as state
+import diffod.functional.system as system
+from diffod.utils import unix_to_mjd
+from astropy.time import Time
+
+def plot_hessian_eigenspace_stability(data_chunks, tle_base, center_freq, epoch_unix, num_passes=3):
+    """
+    Computes the exact Hessian of the Doppler RMSE, evaluates its eigenspectrum 
+    to find saddle points (negative eigenvalues) and null-spaces (near-zero), 
+    and plots the 'Danger Vectors' that cause filter divergence.
+    """
+    param_names = ["n", "f", "g", "h", "k", "L"]
+    num_params = len(param_names)
+    chunk = data_chunks[0]
+    
+    # --- 1. Setup ---
+    active_pass_ids = chunk["pass_ids"][:num_passes]
+    pass_mask = torch.isin(chunk["c"], active_pass_ids)
+    
+    t_active = chunk["t"][pass_mask]
+    d_active_true = chunk["d_true"][pass_mask]
+    t_mean_window = float(torch.mean(t_active))
+    
+    init_tle, _ = dsgp4.newton_method(tle_base, unix_to_mjd(t_mean_window))
+    eval_ssv = state.MEE_SSV(init_tle=init_tle, num_measurements=len(t_active), fit_bstar=False)
+    eval_ssv.add_linear_bias(name="pass_freq_bias", group_indices=chunk["c"][pass_mask])
+    x_eval = eval_ssv.get_initial_state()
+    
+    station_model = system.DifferentiableStation(
+        lat_deg=78.228874, lon_deg=15.376932, alt_m=463.0, ref_unix=t_mean_window, ref_gmst_rad=0.0
+    )
+    prop_eval = system.SGP4(ssv=eval_ssv)
+    meas_eval = system.DopplerMeasurement(
+        ssv=eval_ssv, station_model=station_model, freq_bias_group=eval_ssv.get_bias_group("pass_freq_bias"), time_bias_group=None
+    )
+    pipe_eval = system.MeasurementPipeline(propagator=prop_eval, measurement_model=meas_eval)
+    t_since_meas = (t_active - t_mean_window) + 0.277
+    
+    # --- 2. Define Doppler RMSE Objective ---
+    def loss_doppler(x):
+        d_pred = pipe_eval(x=x, tsince=t_since_meas, epoch=t_mean_window, center_freq=center_freq)
+        return torch.sqrt(torch.mean((d_active_true - d_pred)**2))
+
+    # --- 3. Compute Gradient and Hessian ---
+    g_dopp = grad(loss_doppler)(x_eval)[:num_params]
+    H_dopp = hessian(loss_doppler)(x_eval)[:num_params, :num_params]
+    
+    # Calculate Newton-scaled sensitivity: |g| / |diag(H)|
+    # This represents the magnitude of the theoretical parameter update
+    h_diag_abs = torch.abs(torch.diag(H_dopp))
+    newton_sensitivity = (torch.abs(g_dopp) / (h_diag_abs + 1e-16)).detach().cpu().numpy()
+    
+    # --- 4. Scale Hessian to Dimensionless Curvature Matrix ---
+    # We pre- and post-multiply by D^{-1/2} to remove unit scaling issues
+    D_inv_sqrt = torch.diag(1.0 / torch.sqrt(h_diag_abs + 1e-16))
+    H_norm = D_inv_sqrt @ H_dopp @ D_inv_sqrt
+    
+    # --- 5. Eigendecomposition ---
+    evals, evecs = torch.linalg.eigh(H_norm)
+    evals_np = evals.detach().cpu().numpy()
+    evecs_np = evecs.detach().cpu().numpy()
+    
+    # Identify Danger Vectors: Eigenvalues <= 0.05 (Saddle points and flat valleys)
+    danger_threshold = 0.05
+    danger_indices = np.where(evals_np < danger_threshold)[0]
+    
+    # --- 6. Plotting ---
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot A: Newton-Scaled Sensitivity and Eigenvalue Spectrum
+    x_axis = np.arange(num_params)
+    axes[0].bar(x_axis - 0.2, newton_sensitivity / np.max(newton_sensitivity), 0.4, label="Scaled Sensitivity $(|g_i| / |H_{ii}|)$", color="#1f77b4")
+    
+    # Map eigenvalues to colors (Red for Danger/Negative, Green for Stable/Positive)
+    colors = ['#d62728' if val < danger_threshold else '#2ca02c' for val in evals_np]
+    axes[0].bar(x_axis + 0.2, evals_np, 0.4, label="Hessian Eigenvalues $(\lambda)$", color=colors)
+    
+    axes[0].set_title(f"Optimization Landscape Stability ({num_passes} Passes)")
+    axes[0].set_xticks(x_axis)
+    axes[0].set_xticklabels(param_names)
+    axes[0].axhline(0, color='black', linewidth=1)
+    axes[0].legend()
+    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
+    
+    # Plot B: Composition of the Danger Subspace (Null-space & Saddle Points)
+    if len(danger_indices) > 0:
+        danger_composition = (evecs_np[:, danger_indices]**2).T
+        sns.heatmap(
+            danger_composition, 
+            annot=True, cmap="Reds", fmt=".2f",
+            xticklabels=param_names,
+            yticklabels=[f"$\lambda_{i} = {evals_np[i]:.2e}$" for i in danger_indices],
+            ax=axes[1]
+        )
+        axes[1].set_title(f"Divergent / Null-Space Composition ($\lambda < {danger_threshold}$)")
+        axes[1].set_xlabel("Modified Equinoctial Elements")
+        axes[1].set_ylabel("Danger Eigenvectors")
+    else:
+        axes[1].text(0.5, 0.5, "Strictly Convex Landscape\n(No Danger Vectors)", ha='center', va='center', fontsize=14)
+        axes[1].axis('off')
+
+    plt.tight_layout()
+    plt.show()
