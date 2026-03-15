@@ -2,8 +2,8 @@ import torch
 import numpy as np
 
 from diffod.tle import tle_decode
-from diffod.functional.sgp4 import sgp4_propagate
-from diffod.solvers.gn_svd import svd_solve
+from diffod.propagators import sgp4_propagate
+from diffod.solvers.batchleastsquares import solve
 
 # ---------------------------------------------------------
 # 1. Compile the Pure Physics Engine
@@ -119,7 +119,7 @@ def simulate_and_recover_compiled():
     estimate_mask[9:] = True 
 
     print("Running SVD Solver...")
-    x_opt, P_cov = svd_solve(
+    x_opt, P_cov = solve(
         x_init=x_init,
         y_obs_fixed=y_obs,
         forward_fn=forward_wrapper,

@@ -2,7 +2,7 @@ import pytest
 import torch
 import dsgp4
 from diffod.tle import tle_decode, batch_decode
-from diffod.functional.sgp4 import sgp4_propagate
+from diffod.propagators import sgp4_propagate
 
 # JIT Compile the custom propagator for the tests
 compiled_propagate = torch.jit.script(sgp4_propagate)
