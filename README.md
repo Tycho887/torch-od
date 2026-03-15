@@ -1,4 +1,4 @@
-# torch_od: Differentiable Orbit Determination
+# Torch-OD: Differentiable Orbit Determination
 
 torch_od is a PyTorch-based library for differentiable SGP4 propagation and orbit determination.  
 It provides a **functional, fully vectorized** implementation of the SGP4 propagator that leverages PyTorch’s broadcasting and autograd, enabling:
