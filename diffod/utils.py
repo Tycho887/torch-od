@@ -2,10 +2,7 @@ import torch
 from dsgp4.tle import TLE
 from dsgp4.util import from_datetime_to_mjd
 from dataclasses import dataclass
-import math
-from torch.func import jacfwd
 import numpy as np
-import pandas as pd
 from datetime import datetime, timezone
 
 @dataclass
@@ -122,19 +119,3 @@ def unix_to_mjd(unix_seconds: float) -> float:
     mjd = jd - 2400000.5
 
     return mjd
-
-def tle_decoder(tle_str: list[list[str, str]]) -> torch.Tensor:
-
-    pass
-
-def tle_encoder(sat_name: str,
-                bstar: torch.Tensor,
-                ndot: torch.Tensor,
-                nddot: torch.Tensor,
-                ecco: torch.Tensor,
-                argpo: torch.Tensor,
-                inclo: torch.Tensor,
-                mo: torch.Tensor,
-                no_kozai: torch.Tensor,
-                nodeo: torch.Tensor,
-                )
