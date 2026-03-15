@@ -1,0 +1,35 @@
+name: Publish to TestPyPI
+
+on:
+  push:
+    tags:
+      - 'v*'          # Trigger on tags like v0.1.0, v1.2.3, etc.
+  workflow_dispatch:   # Allow manual triggering from GitHub UI
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Poetry
+        run: |
+          pip install poetry
+          poetry --version
+
+      - name: Configure Poetry for TestPyPI
+        run: |
+          poetry config repositories.testpypi https://test.pypi.org/legacy/
+          poetry config pypi-token.testpypi ${{ secrets.TEST_PYPI_TOKEN }}
+
+      - name: Build package
+        run: poetry build
+
+      - name: Publish to TestPyPI
+        run: poetry publish -r testpypi --no-interaction
