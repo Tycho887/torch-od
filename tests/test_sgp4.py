@@ -1,9 +1,8 @@
 import dsgp4
 import pytest
 import torch
-
-from torch_sgp4.propagators.sgp4 import sgp4_propagate
-from torch_sgp4.tle import batch_decode, tle_decode
+from torch_od.propagators.sgp4 import sgp4_propagate
+from torch_od.tle import batch_decode, tle_decode
 
 # JIT Compile the custom propagator for the tests
 compiled_propagate = torch.jit.script(sgp4_propagate)

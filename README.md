@@ -1,6 +1,6 @@
-# DiffOD: Differentiable Orbit Determination
+# torch_od: Differentiable Orbit Determination
 
-DiffOD is a PyTorch-based library for differentiable SGP4 propagation and orbit determination.  
+torch_od is a PyTorch-based library for differentiable SGP4 propagation and orbit determination.  
 It provides a **functional, fully vectorized** implementation of the SGP4 propagator that leverages PyTorch’s broadcasting and autograd, enabling:
 
 - Efficient batch processing of thousands of satellites across many time steps.
@@ -10,21 +10,21 @@ It provides a **functional, fully vectorized** implementation of the SGP4 propag
 ## Installation
 
 ```bash
-pip install diffod
+pip install torch_od
 ```
 
 Or install in development mode from source:
 
 ```bash
-git clone https://github.com/Tycho887/diffod.git
-cd diffod
+git clone https://github.com/Tycho887/torch_od.git
+cd torch_od
 pip install -e .
 ```
 
 ## Overview
 
 Traditional SGP4 libraries are object‑oriented and loop over satellites and time, which is slow and incompatible with automatic differentiation.  
-DiffOD instead decodes Two‑Line Elements (TLEs) into parameter tensors and propagates them using vectorized operations.  
+torch_od instead decodes Two‑Line Elements (TLEs) into parameter tensors and propagates them using vectorized operations.  
 This design allows you to:
 
 - Propagate **N** satellites for **T** time steps in a single batched call.
@@ -37,8 +37,8 @@ Here is a minimal example to load a TLE and propagate it:
 
 ```python
 import torch
-from diffod.tle import tle_decode
-from diffod.functional.sgp4 import sgp4_propagate
+from torch_od.tle import tle_decode
+from torch_od.functional.sgp4 import sgp4_propagate
 
 # TLE for the ISS (Zarya)
 tle_lines = [
@@ -66,6 +66,6 @@ For more detailed examples, please refer to the User Guide:
 
 ## Citation
 
-If you use DiffOD in your research, please cite …
+If you use torch_od in your research, please cite …
 
 ## License

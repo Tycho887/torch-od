@@ -3,8 +3,8 @@ import time
 import dsgp4
 import torch
 
-from torch_sgp4.propagators.sgp4 import sgp4_propagate
-from torch_sgp4.tle import batch_decode
+from torch_od.propagators.sgp4 import sgp4_propagate
+from torch_od.tle import batch_decode
 
 compiled_propagate = torch.jit.script(sgp4_propagate)
 

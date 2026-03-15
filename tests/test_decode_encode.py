@@ -2,8 +2,7 @@ import datetime
 
 import pytest
 import torch
-
-from torch_sgp4.tle import batch_decode, batch_encode, tle_decode, tle_encode
+from torch_od.tle import batch_decode, batch_encode, tle_decode, tle_encode
 
 
 # --- Helper Functions ---

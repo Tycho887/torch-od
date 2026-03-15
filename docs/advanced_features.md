@@ -11,8 +11,8 @@ This guide shows how to build differentiable measurement models and use the buil
 ### Example: Doppler Forward Model with Biases
 
 ```python
-from diffod.physics import compute_doppler, apply_linear_bias
-from diffod.utils import BiasGroup
+from torch_od.physics import compute_doppler, apply_linear_bias
+from torch_od.utils import BiasGroup
 
 # Assume we have contact_ids (N,) indicating which pass each measurement belongs to
 bias_group = BiasGroup(
@@ -36,7 +36,7 @@ def forward_model(x: torch.Tensor) -> torch.Tensor:
 The `svd_solve` function performs iterative least‑squares estimation using an SVD‑based pseudoinverse. It automatically computes the Jacobian of your forward model with `torch.func.jacfwd`.
 
 ```python
-from diffod.gn_svd import svd_solve
+from torch_od.gn_svd import svd_solve
 
 # Initial state (9 TLE params + biases)
 x_init = torch.cat([tle_decode(tle_iss), torch.zeros(2)])

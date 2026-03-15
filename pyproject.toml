@@ -1,5 +1,5 @@
 [project]
-name = "torch_sgp4"
+name = "torch_od"
 version = "0.1.0"
 description = "Orbit determination using differentiable programming"
 authors = [

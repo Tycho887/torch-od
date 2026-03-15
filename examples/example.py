@@ -1,9 +1,9 @@
 import numpy as np
 import torch
 
-from torch_sgp4.propagators.sgp4 import sgp4_propagate
-from torch_sgp4.solvers.batchleastsquares import solve
-from torch_sgp4.tle import tle_decode
+from torch_od.propagators.sgp4 import sgp4_propagate
+from torch_od.solvers.batchleastsquares import solve
+from torch_od.tle import tle_decode
 
 # ---------------------------------------------------------
 # 1. Compile the Pure Physics Engine

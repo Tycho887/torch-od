@@ -11,7 +11,7 @@ This guide covers loading TLEs, encoding/decoding them to tensors, and propagati
 
 *Example (based on `test_tle.py`):*  
 ```python
-from diffod.tle import tle_decode, tle_encode, batch_decode, batch_encode
+from torch_od.tle import tle_decode, tle_encode, batch_decode, batch_encode
 import datetime
 
 # Single TLE
