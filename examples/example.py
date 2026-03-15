@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-
 from diffod.tle import tle_decode
 from diffod.propagators import sgp4_propagate
 from diffod.solvers.batchleastsquares import solve

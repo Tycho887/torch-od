@@ -1,20 +1,8 @@
 import torch
 from dsgp4.tle import TLE
 from dsgp4.util import from_datetime_to_mjd
-from dataclasses import dataclass
 import numpy as np
 from datetime import datetime, timezone
-
-@dataclass
-class BiasGroup:
-    """
-    Stores metadata for a specific group of bias parameters.
-    """
-    name: str
-    indices: torch.Tensor  # (N_measurements,) Mapping: meas_idx -> local_param_idx
-    global_offset: int     # Where this group starts in the state vector 'x'
-    num_params: int        # How many parameters are in this group
-
 
 def unix_to_tai(time_in: float | torch.Tensor) -> float | torch.Tensor:
     """

@@ -1,5 +1,14 @@
 import torch
-from diffod.utils import BiasGroup
+from dataclasses import dataclass
+@dataclass
+class BiasGroup:
+    """
+    Stores metadata for a specific group of bias parameters.
+    """
+    name: str
+    indices: torch.Tensor  # (N_measurements,) Mapping: meas_idx -> local_param_idx
+    global_offset: int     # Where this group starts in the state vector 'x'
+    num_params: int        # How many parameters are in this group
 
 def compute_doppler(sat_pos, sat_vel, st_pos, st_vel, center_freq) -> torch.Tensor:
     """
@@ -64,3 +73,4 @@ def apply_linear_bias(
     corrected[mask] = corrected[mask] + active_biases * scaling
 
     return corrected
+
