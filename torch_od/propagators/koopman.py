@@ -128,12 +128,12 @@ x0 = np.array([0.1, 0.05, 0.1, -0.05, 0.2, 0.1, 0.0, 0.1])
 t_span = (0, 10)
 t_eval = np.linspace(t_span[0], t_span[1], 200)
 
-sol_exact = solve_ivp(exact_dynamics, t_span, x0, t_eval=t_eval, method='RK45')
+sol_exact = solve_ivp(exact_dynamics, t_span, x0, t_eval=t_eval, method='DOP853', rtol=1e-13, atol=1e-13)
 
 # ==========================================
 # 4. Loop Orders to Compare Error
 # ==========================================
-for max_order in [3, 5, 7]:
+for max_order in [3, 5, 7, 9]:
     basis = []
     for comb in itertools.product(range(max_order + 1), repeat=d):
         total_degree = sum(comb)
