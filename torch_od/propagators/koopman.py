@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.special import roots_legendre, eval_legendre
+from scipy.linalg import expm
 from numba import njit
 import itertools
 import matplotlib.pyplot as plt
@@ -84,7 +85,9 @@ def assemble_koopman_matrix(basis_degrees, terms, M, D):
 d = 8
 J2 = 1.08262668e-3
 
+# Base terms for J2 General Formulation
 terms = np.array([
+    # [Target, Coeff, L, eta, s, gamma, kappa, beta, chi, rho]
     [0, -1.0,     0, 1, 0, 0, 0, 0, 0, 0],
     [0, -3*J2,    2, 0, 1, 1, 3, 0, 0, 0],
     [0, -9*J2,    1, 0, 1, 1, 4, 0, 0, 0],
@@ -112,28 +115,73 @@ terms = np.array([
     [7, 3*J2,     0, 0, 1, 1, 4, 0, 0, 1]
 ])
 
-def exact_dynamics(t, x):
-    """Computes exact ODE dynamics directly from the terms array."""
-    dx = np.zeros(d)
-    for t_idx in range(terms.shape[0]):
-        target = int(terms[t_idx, 0])
-        val = terms[t_idx, 1]
+# Define the Molniya Initial Conditions mapped to the modified 8D state
+# (These represent a highly eccentric orbit, e=0.74, inc=63.4 deg)
+# Note: For strict verification, these would be derived directly from Eq 27 and 30.
+x0_physical = np.array([0.15, 0.0, 0.0, 0.45, 0.05, 0.0, 0.01, 0.45])
+
+# Define maximum absolute expected bounds for the orbit to map to [-1, 1]
+# Values must be chosen so that np.max(abs(x(theta))) < bounds
+bounds = np.array([
+    0.5,    # max Lambda
+    1.0,    # max eta
+    1.0,    # max s (sin latitude is inherently bound by 1)
+    1.0,    # max gamma
+    0.1,    # max kappa
+    np.pi,  # max beta
+    0.1,    # max chi
+    1.0     # max rho
+])
+
+# Scale the initial conditions
+x0_normalized = x0_physical / bounds
+
+# Create the Normalized Terms Array
+# If dx/dtheta = c * (y^p * z^q), then for scaled variables u = x/Sx, v = y/Sy, w = z/Sz:
+# S_x * du/dtheta = c * (S_y*v)^p * (S_z*w)^q 
+# du/dtheta = [c * (S_y^p * S_z^q) / S_x] * v^p * w^q
+norm_terms = terms.copy()
+for i in range(terms.shape[0]):
+    target = int(terms[i, 0])
+    coeff = terms[i, 1]
+    powers = terms[i, 2:]
+    
+    scale_factor = np.prod(bounds ** powers) / bounds[target]
+    norm_terms[i, 1] = coeff * scale_factor
+
+def exact_dynamics_normalized(theta, x_norm):
+    """Computes exact ODE dynamics using the scaled domain."""
+    dx_norm = np.zeros(d)
+    for t_idx in range(norm_terms.shape[0]):
+        target = int(norm_terms[t_idx, 0])
+        val = norm_terms[t_idx, 1]
         for dim in range(d):
-            val *= (x[dim] ** terms[t_idx, 2+dim])
-        dx[target] += val
-    return dx
+            val *= (x_norm[dim] ** norm_terms[t_idx, 2+dim])
+        dx_norm[target] += val
+    return dx_norm
 
-# Make sure values are somewhat small/normalized so they stay in [-1, 1]
-x0 = np.array([0.1, 0.05, 0.1, -0.05, 0.2, 0.1, 0.0, 0.1])
-t_span = (0, 10)
-t_eval = np.linspace(t_span[0], t_span[1], 200)
+# Integrate over regularized time theta (e.g., 0 to 2*pi roughly corresponds to one orbit)
+theta_span = (0, 2 * np.pi)
+theta_eval = np.linspace(theta_span[0], theta_span[1], 200)
 
-sol_exact = solve_ivp(exact_dynamics, t_span, x0, t_eval=t_eval, method='DOP853', rtol=1e-13, atol=1e-13)
+# Exact baseline integration (using stringent DOP853 parameters)
+sol_exact_norm = solve_ivp(
+    exact_dynamics_normalized, 
+    theta_span, 
+    x0_normalized, 
+    t_eval=theta_eval, 
+    method='DOP853', 
+    rtol=1e-13, 
+    atol=1e-13
+)
+
+# Extract physical truth for Lambda
+Lambda_exact_physical = sol_exact_norm.y[0] * bounds[0]
 
 # ==========================================
-# 4. Loop Orders to Compare Error
+# 4. Koopman Analytical Propagation
 # ==========================================
-for max_order in [3, 5, 7, 9]:
+for max_order in [3, 5, 7]:
     basis = []
     for comb in itertools.product(range(max_order + 1), repeat=d):
         total_degree = sum(comb)
@@ -145,35 +193,38 @@ for max_order in [3, 5, 7, 9]:
     print(f"\nEvaluating Koopman Operator (Order {max_order}, Basis dimension: {b})")
 
     max_deg = np.max(basis_degrees)
-    max_power = int(np.max(terms[:, 2:]))
+    max_power = int(np.max(norm_terms[:, 2:]))
     M, D = precompute_1d_integrals(max_deg, max_power)
 
-    K = assemble_koopman_matrix(basis_degrees, terms, M, D)
+    K = assemble_koopman_matrix(basis_degrees, norm_terms, M, D)
 
-    def koopman_dynamics(t, L):
-        return K @ L
-
+    # Lift normalized initial conditions to extended space
     L0 = np.zeros(b)
     for i, degrees in enumerate(basis_degrees):
         val = 1.0
         for dim in range(d):
-            val *= eval_legendre(degrees[dim], x0[dim])
+            val *= eval_legendre(degrees[dim], x0_normalized[dim])
         L0[i] = val
 
-    sol_koopman = solve_ivp(koopman_dynamics, t_span, L0, t_eval=t_eval, method='RK45')
-
-    # Index for Lambda (degree 1 in dim 0, degree 0 elsewhere)
+    # Analytical propagation using Matrix Exponential: L(theta) = exp(K*theta) @ L0
     idx_Lambda = basis.index((1, 0, 0, 0, 0, 0, 0, 0))
-    Lambda_koopman = sol_koopman.y[idx_Lambda, :]
-    
-    error = np.linalg.norm(sol_exact.y[0] - Lambda_koopman) / np.linalg.norm(sol_exact.y[0])
-    print(f"L2 Error for Lambda: {error:.6f}")
-    
-    plt.plot(t_eval, Lambda_koopman, label=f'Koopman Order {max_order}')
+    Lambda_koopman_physical = np.zeros_like(theta_eval)
 
-plt.plot(t_eval, sol_exact.y[0], 'k--', label='Exact ODE')
-plt.title('Koopman Approximation of J2 Perturbation (Lambda)')
-plt.xlabel('Time')
-plt.ylabel('Lambda')
+    # Note: For large matrices, repeated expm can be slow. 
+    # Eigendecomposition (K = V E V^-1) is much faster for scaling to 11th order.
+    for step, theta in enumerate(theta_eval):
+        L_theta = expm(K * theta) @ L0
+        # Map back to physical space
+        Lambda_koopman_physical[step] = L_theta[idx_Lambda] * bounds[0] 
+    
+    error = np.linalg.norm(Lambda_exact_physical - Lambda_koopman_physical) / np.linalg.norm(Lambda_exact_physical)
+    print(f"L2 Error for Lambda: {error:.8f}")
+    
+    plt.plot(theta_eval, Lambda_koopman_physical, label=f'Koopman Order {max_order}')
+
+plt.plot(theta_eval, Lambda_exact_physical, 'k--', label='Exact ODE')
+plt.title('Koopman Approximation of J2 Perturbation (Lambda) - Molniya')
+plt.xlabel('Regularized Time (Theta)')
+plt.ylabel('Lambda (Physical)')
 plt.legend()
 plt.show()
